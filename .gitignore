@@ -1,0 +1,24 @@
+# Ignore everything by default (including dotfiles)
+*
+.*
+
+# Keep this file
+!.gitignore
+
+# Allow only selected code files
+!/am_processes.py
+!/benchmark_fea_accuracy.py
+!/benchmark_projection_compare.py
+!/beso_3d.py
+!/cad_importer.py
+!/core_components.py
+!/density_filter_3d.py
+!/fea_solver_3d.py
+!/homogenization_3d.py
+!/lsm_3d.py
+!/main_interactive_v3.py
+!/materials_library.py
+!/mma_solver.py
+!/parameter_menu.py
+!/simp_3d.py
+!/unified_gui.py

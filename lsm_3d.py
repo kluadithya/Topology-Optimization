@@ -1,0 +1,644 @@
+﻿"""
+3D Level Set Method (LSM) optimizer with Hamilton-Jacobi PDE evolution.
+
+Implements a proper geometric level-set method:
+  - Level-set function phi defined on element centroids
+  - Hamilton-Jacobi PDE: dphi/dt + V_n * |grad_phi| = 0
+  - Shape derivative velocity from strain energy at the interface
+  - Least-squares gradient reconstruction on unstructured tet mesh
+  - Fast Marching Method (graph-based) for signed-distance reinitialization
+  - Regularized Heaviside for smooth density mapping
+"""
+
+import heapq
+import numpy as np
+from scipy.spatial import cKDTree
+from fea_solver_3d import FEASolver3D
+from density_filter_3d import DensityFilter3D, MinimumMemberSizeProjection3D, auto_filter_radius_from_mesh
+
+
+class LSM3DOptimizer:
+    """3D Level-Set Method optimizer with Hamilton-Jacobi PDE evolution and auto convergence."""
+
+    def __init__(self, nodes, elements, material, config):
+        self.fea = FEASolver3D(nodes, elements, material)
+        self.config = config
+        try:
+            self.fea.configure_linear_solver(
+                mode=config.get('linear_solver', 'auto'),
+                iterative_threshold_dofs=int(config.get('iterative_solver_dof_threshold', 50000)),
+                cg_tol=float(config.get('iterative_solver_tol', 1e-8)),
+                cg_maxiter=int(config.get('iterative_solver_maxiter', 2000)),
+                use_pyamg=bool(config.get('use_pyamg_preconditioner', True)),
+            )
+        except Exception:
+            pass
+        self.material = material
+        self.n_elements = int(elements.shape[0])
+
+        objective = str(config.get('objective', config.get('objective_function', 'compliance'))).lower()
+        volfrac = float(config.get('volume_fraction', config.get('volfrac', 0.5)))
+        if objective == 'weight':
+            wr = config.get('weight_reduction_percent', config.get('target_weight_reduction_percent', None))
+            if wr is not None:
+                try:
+                    volfrac = 1.0 - float(wr) / 100.0
+                except Exception:
+                    pass
+        self.volfrac = float(np.clip(volfrac, 0.05, 1.0))
+
+        self.penalty = float(config.get('penalization', config.get('penalty', 3.0)))
+        self.max_iterations = int(config.get('max_iterations_auto', config.get('iterations', 300)))
+        self.min_iterations = int(max(10, config.get('min_iterations_auto', 60)))
+        self.change_tol = float(config.get('density_change_tolerance', 1e-3))
+        self.comp_tol = float(config.get('compliance_tolerance', 5e-4))
+        self.stall_patience = int(max(3, config.get('stall_patience', 8)))
+
+        # Hamilton-Jacobi PDE parameters
+        self.time_step = float(config.get('lsm_time_step', 0.25))
+        self.cfl_factor = float(config.get('lsm_cfl_factor', 0.5))  # CFL safety factor
+        self.epsilon = float(config.get('lsm_heaviside_epsilon', 0.10))  # Heaviside regularization width
+        self.reinit_interval = int(max(0, config.get('lsm_reinit_interval', 5)))
+        self.reinit_method = str(config.get('lsm_reinit_method', 'fast_marching')).lower()
+        self.init_mode = str(config.get('lsm_init_mode', 'ellipsoid')).lower()
+        self.init_noise = float(max(config.get('lsm_init_noise', 0.0), 0.0))
+        self.velocity_smooth_passes = int(max(0, config.get('lsm_velocity_smooth_passes', 1)))
+        self.nucleation_weight_floor = float(np.clip(config.get('lsm_nucleation_weight_floor', 0.0), 0.0, 1.0))
+        self.phi_smooth_weight = float(np.clip(config.get('lsm_phi_smooth_weight', 0.15), 0.0, 0.49))
+        self.phi_smooth_passes = int(max(0, config.get('lsm_phi_smooth_passes', 1)))
+
+        self.rho_min = float(config.get('rho_min', getattr(material, 'rho_min', 1e-6)))
+        self.rho_min = float(np.clip(self.rho_min, 1e-9, 5e-2))
+        self.auto_filter_radius = bool(config.get('auto_filter_radius', True))
+        self.filter_radius_factor = float(config.get('filter_radius_factor', 3.5))
+        if self.auto_filter_radius or ('filter_radius' not in config):
+            self.filter_radius, self.element_size = auto_filter_radius_from_mesh(
+                self.fea.nodes,
+                self.fea.elements,
+                factor=self.filter_radius_factor,
+            )
+        else:
+            self.filter_radius = float(max(config.get('filter_radius', 1.0), 1e-9))
+            self.element_size = np.nan
+        self.filter = DensityFilter3D(self.fea.nodes, self.fea.elements, self.filter_radius)
+
+        self.use_min_member_projection = bool(config.get('use_min_member_projection_lsm', config.get('use_min_member_projection', False)))
+        self.min_member_size_factor = float(config.get('min_member_size_factor', 1.5))
+        min_member_size_mm = config.get('min_member_size_mm', None)
+        if min_member_size_mm is not None and np.isfinite(self.element_size) and self.element_size > 0.0:
+            try:
+                self.min_member_size_factor = max(self.min_member_size_factor, float(min_member_size_mm) / float(self.element_size))
+            except Exception:
+                pass
+        self.proj_beta_start = float(config.get('min_member_projection_beta_start', 1.0))
+        self.proj_beta_end = float(config.get('min_member_projection_beta_end', config.get('min_member_projection_beta', 32.0)))
+        self.member_projector = None
+        if self.use_min_member_projection:
+            self.member_projector = MinimumMemberSizeProjection3D(
+                self.fea.nodes,
+                self.fea.elements,
+                self.filter_radius,
+                size_factor=self.min_member_size_factor,
+                beta=self.proj_beta_start,
+            )
+
+        self.use_stress_constraint = bool(config.get('use_stress_constraint', True))
+        self.safety_factor = float(config.get('safety_factor', 1.5))
+        self.stress_penalty_weight = float(config.get('stress_penalty_weight', 2.0))
+        ys = float(getattr(material, 'yield_strength', config.get('yield_strength', 250e6)))
+        self.allowable_stress = ys / max(self.safety_factor, 1e-9)
+
+        passive = config.get('passive_solid_elements', None)
+        self.passive_solid = np.zeros(self.n_elements, dtype=bool)
+        if passive is not None:
+            p = np.asarray(passive, dtype=bool).reshape(-1)
+            if p.size == self.n_elements:
+                self.passive_solid = p.copy()
+
+        passive_frac = float(np.mean(self.passive_solid)) if self.passive_solid.size else 0.0
+        min_target = passive_frac + (1.0 / max(self.n_elements, 1))
+        self.volfrac_eff = float(np.clip(max(self.volfrac, min_target), 0.05, 1.0))
+
+        # Initialize level-set field as signed distance from initial volume fraction
+        # Positive = solid, negative = void
+        self.centroids = np.mean(self.fea.nodes[self.fea.elements], axis=1)
+        self._build_element_graph()
+
+        # Initialize phi as a smooth contiguous field to avoid speckled early removal.
+        bbox_min = np.min(self.centroids, axis=0)
+        bbox_max = np.max(self.centroids, axis=0)
+        bbox_center = 0.5 * (bbox_min + bbox_max)
+        bbox_half = 0.5 * (bbox_max - bbox_min)
+        bbox_diag = float(np.linalg.norm(bbox_half))
+
+        scale = np.maximum(bbox_half, 1e-12)
+        r_norm = np.linalg.norm((self.centroids - bbox_center) / scale, axis=1)
+        r0 = float(np.clip(self.volfrac_eff, 0.05, 0.99) ** (1.0 / 3.0))
+        self.phi = (r0 - r_norm) * max(bbox_diag, 1e-6)
+
+        if self.init_mode == 'solid':
+            self.phi = np.full(self.n_elements, max(bbox_diag, 1e-6), dtype=np.float64)
+
+        if self.init_noise > 0.0:
+            rng = np.random.default_rng(7)
+            amp = self.init_noise * max(bbox_diag, 1e-6)
+            n = amp * rng.standard_normal(self.n_elements)
+            for _ in range(2):
+                n = self.filter.apply_density(n)
+            self.phi += n
+
+        self._enforce_passive_on_phi()
+        self._enforce_volume()
+
+        elems = np.asarray(self.fea.elements, dtype=np.int64)
+        npe = int(elems.shape[1])
+        self.elem_dofs = (3 * elems[:, :, None] + np.arange(3, dtype=np.int64)).reshape(self.n_elements, 3 * npe)
+        rho_probe = np.ones(self.n_elements, dtype=np.float64)
+        self.ke0 = np.stack([self.fea.get_element_stiffness(i, rho_probe, penalty=1.0) for i in range(self.n_elements)], axis=0)
+
+        # Precompute least-squares gradient operators for each element
+        self._precompute_gradient_operators()
+
+    def _projection_beta(self, iteration):
+        b0 = max(self.proj_beta_start, 1.0)
+        b1 = max(self.proj_beta_end, b0)
+        if self.max_iterations <= 1:
+            return b1
+
+        use_staged = bool(self.config.get('use_staged_beta_schedule', True))
+        if not use_staged:
+            t = float(iteration) / float(max(self.max_iterations - 1, 1))
+            return b0 * ((b1 / b0) ** t)
+
+        levels = [b0]
+        while levels[-1] < b1:
+            nxt = min(levels[-1] * 2.0, b1)
+            if abs(nxt - levels[-1]) < 1e-12:
+                break
+            levels.append(nxt)
+
+        stage_len = int(np.ceil(float(self.max_iterations) / float(max(len(levels), 1))))
+        stage_idx = int(np.clip(iteration // max(stage_len, 1), 0, len(levels) - 1))
+        return float(levels[stage_idx])
+
+    def _enforce_passive_on_phi(self):
+        if np.any(self.passive_solid):
+            self.phi[self.passive_solid] = 20.0
+
+    def _enforce_passive_on_rho(self, rho):
+        if np.any(self.passive_solid):
+            rho[self.passive_solid] = 1.0
+        return rho
+
+    # â”€â”€ Regularized Heaviside: maps phi â†’ density â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+    def _heaviside_density(self, phi=None):
+        """Regularized Heaviside function for smooth density mapping.
+
+        H_eps(phi) = { 0                                        if phi < -eps
+                     { 0.5 * (1 + phi/eps + sin(pi*phi/eps)/pi)  if |phi| <= eps
+                     { 1                                        if phi > eps
+
+        This is the standard regularized Heaviside used in level-set topology optimization
+        (Allaire et al. 2004, Wang et al. 2003).
+        """
+        if phi is None:
+            phi = self.phi
+        eps = max(self.epsilon * self.filter_radius, 1e-12)
+        rho = np.zeros(self.n_elements, dtype=np.float64)
+
+        # Region: phi > eps â†’ solid
+        solid = phi > eps
+        rho[solid] = 1.0
+
+        # Region: |phi| <= eps â†’ transition
+        band = np.abs(phi) <= eps
+        if np.any(band):
+            x = phi[band] / eps
+            rho[band] = 0.5 * (1.0 + x + np.sin(np.pi * x) / np.pi)
+
+        # Region: phi < -eps â†’ void (already 0)
+        # Clamp to [rho_min, 1]
+        rho = np.clip(rho, self.rho_min, 1.0)
+        return self._enforce_passive_on_rho(rho)
+
+    def _heaviside_derivative(self, phi=None):
+        """Derivative of regularized Heaviside: delta_eps(phi).
+
+        delta_eps(phi) = { 0                              if |phi| > eps
+                         { (1 + cos(pi*phi/eps)) / (2*eps) if |phi| <= eps
+        """
+        if phi is None:
+            phi = self.phi
+        eps = max(self.epsilon * self.filter_radius, 1e-12)
+        delta = np.zeros(self.n_elements, dtype=np.float64)
+
+        band = np.abs(phi) <= eps
+        if np.any(band):
+            x = phi[band] / eps
+            delta[band] = (1.0 + np.cos(np.pi * x)) / (2.0 * eps)
+
+        return delta
+
+    # â”€â”€ Element connectivity graph â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+    def _build_element_graph(self):
+        """Build element-element adjacency from shared nodes."""
+        elems = np.asarray(self.fea.elements, dtype=np.int64)
+        n_nodes = int(np.asarray(self.fea.nodes).shape[0])
+        node_to_elems = [[] for _ in range(n_nodes)]
+        for eidx in range(self.n_elements):
+            for nid in elems[eidx]:
+                ni = int(nid)
+                if 0 <= ni < n_nodes:
+                    node_to_elems[ni].append(eidx)
+
+        self.elem_neighbors = []
+        for eidx in range(self.n_elements):
+            nset = set()
+            for nid in elems[eidx]:
+                nset.update(node_to_elems[int(nid)])
+            nset.discard(eidx)
+            self.elem_neighbors.append(np.asarray(sorted(nset), dtype=np.int64))
+
+    # â”€â”€ Gradient computation: least-squares on unstructured mesh â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+    def _precompute_gradient_operators(self):
+        """Precompute least-squares gradient reconstruction operators.
+
+        For each element i, we fit: phi(j) - phi(i) â‰ˆ grad_phi_i Â· (c_j - c_i)
+        using all neighbors j. This gives a 3-component gradient at each element centroid.
+        The normal Moore-Penrose pseudoinverse is precomputed for efficiency.
+        """
+        self._grad_neighbors = []
+        self._grad_pinv = []  # Each entry: (3, n_neighbors) pseudoinverse matrix
+
+        for i in range(self.n_elements):
+            nbrs = self.elem_neighbors[i]
+            if len(nbrs) == 0:
+                self._grad_neighbors.append(np.array([], dtype=np.int64))
+                self._grad_pinv.append(np.zeros((3, 0), dtype=np.float64))
+                continue
+
+            # Delta vectors from centroid i to each neighbor centroid
+            dx = self.centroids[nbrs] - self.centroids[i]  # (n_nbr, 3)
+
+            # Compute pseudoinverse: pinv(dx) has shape (3, n_nbr)
+            try:
+                pinv = np.linalg.pinv(dx)  # (3, n_nbr)
+            except np.linalg.LinAlgError:
+                pinv = np.zeros((3, len(nbrs)), dtype=np.float64)
+
+            self._grad_neighbors.append(nbrs)
+            self._grad_pinv.append(pinv)
+
+    def _compute_gradient(self, field):
+        """Compute gradient of a scalar field using precomputed least-squares operators.
+
+        Parameters
+        ----------
+        field : ndarray (n_elements,)
+            Scalar field values at element centroids.
+
+        Returns
+        -------
+        grad : ndarray (n_elements, 3)
+            Gradient vector at each element centroid.
+        """
+        field = np.asarray(field, dtype=np.float64)
+        grad = np.zeros((self.n_elements, 3), dtype=np.float64)
+
+        for i in range(self.n_elements):
+            nbrs = self._grad_neighbors[i]
+            if len(nbrs) == 0:
+                continue
+            dphi = field[nbrs] - field[i]  # (n_nbr,)
+            grad[i] = self._grad_pinv[i] @ dphi  # (3, n_nbr) @ (n_nbr,) â†’ (3,)
+
+        return grad
+
+    def _compute_gradient_magnitude(self, field):
+        """Compute |âˆ‡field| at each element centroid."""
+        grad = self._compute_gradient(field)
+        return np.sqrt(np.sum(grad ** 2, axis=1))
+
+    def _smooth_field_on_graph(self, field, passes=1):
+        """Neighbor averaging on element graph for mild regularization."""
+        if passes <= 0:
+            return np.asarray(field, dtype=np.float64)
+        src = np.asarray(field, dtype=np.float64).copy()
+        for _ in range(passes):
+            out = src.copy()
+            for i, nbrs in enumerate(self.elem_neighbors):
+                if len(nbrs) == 0:
+                    continue
+                out[i] = float(np.mean(src[nbrs]))
+            src = out
+        return src
+
+    def _smooth_phi(self):
+        """Apply a small diffusion-like smoothing to reduce jagged boundaries."""
+        if self.phi_smooth_passes <= 0 or self.phi_smooth_weight <= 0.0:
+            return
+        lam = self.phi_smooth_weight
+        for _ in range(self.phi_smooth_passes):
+            avg = self._smooth_field_on_graph(self.phi, passes=1)
+            self.phi = (1.0 - lam) * self.phi + lam * avg
+            self._enforce_passive_on_phi()
+
+    # â”€â”€ Hamilton-Jacobi PDE evolution â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+    def _shape_derivative_velocity(self, u, rho):
+        """Compute shape derivative velocity field.
+
+        For compliance minimization, the shape derivative at the interface is:
+            V_n = -ce (element strain energy density)
+
+        This velocity is defined at the interface and extended to the domain.
+        """
+        ue = u[self.elem_dofs]
+        ce0 = np.einsum('ni,nij,nj->n', ue, self.ke0, ue)
+
+        # Shape derivative: V_n = -strain_energy at interface
+        velocity = -ce0
+
+        # Apply stress constraint penalty if enabled
+        if self.use_stress_constraint:
+            vm = self.fea.calculate_stress_all_gauss(u, rho, self.penalty)
+            ratio = vm / max(self.allowable_stress, 1e-12)
+            violation = np.maximum(ratio - 1.0, 0.0)
+            stress_penalty = 1.0 + self.stress_penalty_weight * (violation ** 2)
+            velocity = velocity * stress_penalty
+
+        return velocity
+
+    def _upwind_hj_update(self, velocity):
+        """Solve Hamilton-Jacobi PDE: dphi/dt + V_n * |grad_phi| = 0.
+
+        Uses first-order upwind scheme on unstructured mesh.
+        The gradient magnitude |âˆ‡Ï†| is computed via least-squares reconstruction
+        and the update is: phi_new = phi - dt * V_n * |grad_phi|.
+
+        CFL condition is enforced for stability.
+        """
+        # Compute gradient of phi
+        grad_phi = self._compute_gradient(self.phi)
+        grad_mag = np.sqrt(np.sum(grad_phi ** 2, axis=1))
+
+        # For upwind stability: use gradient magnitude but ensure it's not
+        # degenerate away from the interface
+        grad_mag_safe = np.maximum(grad_mag, 1e-12)
+
+        # CFL-limited time step
+        max_vel = float(np.max(np.abs(velocity)))
+        if max_vel < 1e-30:
+            return
+
+        # Characteristic mesh size for CFL
+        h = max(self.element_size if np.isfinite(self.element_size) else self.filter_radius, 1e-12)
+        dt_cfl = self.cfl_factor * h / max(max_vel, 1e-12)
+        dt = min(self.time_step * h, dt_cfl)
+
+        # H-J update: phi_new = phi - dt * V_n * |grad_phi|
+        self.phi = self.phi - dt * velocity * grad_mag_safe
+
+        # Clamp phi to avoid blow-up
+        self.phi = np.clip(self.phi, -20.0 * h, 20.0 * h)
+        self._enforce_passive_on_phi()
+
+    # â”€â”€ Volume constraint enforcement â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+    def _enforce_volume(self):
+        """Shift phi uniformly to satisfy the volume constraint."""
+        eps = max(self.epsilon * self.filter_radius, 1e-12)
+
+        lo, hi = -50.0 * eps, 50.0 * eps
+        for _ in range(60):
+            mid = 0.5 * (lo + hi)
+            rho_trial = self._heaviside_density(self.phi + mid)
+            if float(np.mean(rho_trial)) > self.volfrac_eff:
+                hi = mid
+            else:
+                lo = mid
+            if (hi - lo) < 1e-12 * eps:
+                break
+        self.phi += 0.5 * (lo + hi)
+        self._enforce_passive_on_phi()
+
+    # â”€â”€ Fast Marching reinitialization â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+    def _fast_marching_reinit(self):
+        """Reinitialize phi to approximate signed-distance function using
+        graph-based Fast Marching Method.
+
+        The FMM solves |âˆ‡T| = 1 from the interface (phi â‰ˆ 0) outward,
+        giving a distance field. The sign is preserved from the current phi.
+        """
+        rho = self._heaviside_density()
+
+        # Find interface elements: those near phi=0 (rho near 0.5)
+        eps = max(self.epsilon * self.filter_radius, 1e-12)
+        interface = np.abs(self.phi) <= eps
+        if not np.any(interface):
+            # Fallback: find elements closest to rho=0.5
+            k = int(np.clip(max(32, int(0.03 * self.n_elements)), 1, self.n_elements))
+            idx = np.argpartition(np.abs(rho - 0.5), k - 1)[:k]
+            interface = np.zeros(self.n_elements, dtype=bool)
+            interface[idx] = True
+
+        # Preserve sign
+        sign = np.where(self.phi >= 0.0, 1.0, -1.0)
+
+        # Dijkstra-based FMM: solve for distance from interface
+        inf = 1e30
+        dist = np.full(self.n_elements, inf, dtype=np.float64)
+        heap = []
+
+        seed_ids = np.where(interface)[0]
+        for i in seed_ids.tolist():
+            # Initialize with |phi| as starting distance (more accurate than 0)
+            d0 = abs(float(self.phi[i]))
+            dist[i] = d0
+            heapq.heappush(heap, (d0, int(i)))
+
+        while heap:
+            d, i = heapq.heappop(heap)
+            if d > dist[i]:
+                continue
+            ci = self.centroids[i]
+            for j in self.elem_neighbors[i]:
+                jj = int(j)
+                # Edge weight is the physical distance between centroids
+                w = float(np.linalg.norm(ci - self.centroids[jj]))
+                nd = d + max(w, 1e-12)
+                if nd < dist[jj]:
+                    dist[jj] = nd
+                    heapq.heappush(heap, (nd, jj))
+
+        # Handle unreached elements (disconnected components)
+        missing = dist >= (0.5 * inf)
+        if np.any(missing) and np.any(interface):
+            tree = cKDTree(self.centroids[interface])
+            d_euc, _ = tree.query(self.centroids[missing], k=1)
+            dist[missing] = np.asarray(d_euc, dtype=np.float64)
+
+        # Reconstruct signed distance
+        phi_new = sign * dist
+
+        # Smooth blend with current phi to avoid discontinuities
+        blend = float(self.config.get('lsm_reinit_blend', 0.70))
+        self.phi = blend * phi_new + (1.0 - blend) * self.phi
+        self.phi = np.clip(self.phi, -20.0 * max(self.filter_radius, 1e-6), 20.0 * max(self.filter_radius, 1e-6))
+        self._enforce_passive_on_phi()
+
+    # â”€â”€ Final binary projection â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+    def _binary_projection(self):
+        """Project to binary field for final result output."""
+        n_solid = int(np.clip(round(self.volfrac_eff * self.n_elements), 1, self.n_elements))
+        order = np.argsort(self.phi)[::-1]
+        rho_bin = np.full(self.n_elements, self.rho_min, dtype=np.float64)
+        rho_bin[order[:n_solid]] = 1.0
+        self._enforce_passive_on_rho(rho_bin)
+        return rho_bin
+
+    # â”€â”€ Main optimization loop â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+    def optimize(self, forces, fixed_dofs, n_iterations=None, visualizer=None):
+        n_iter = self.max_iterations if n_iterations is None else int(min(max(1, n_iterations), self.max_iterations))
+        compliance_history = []
+        prev_rho = None
+        prev_comp = None
+        stable_count = 0
+
+        print('\n' + '=' * 60)
+        print('3D Level-Set Optimization (Hamilton-Jacobi PDE, Auto-Stop)')
+        print('=' * 60)
+        print(f'  [LSM] H-J PDE evolution with upwind gradient, CFL={self.cfl_factor:.2f}')
+        print(f'  [LSM] Regularized Heaviside eps={self.epsilon:.3f} * filter_radius')
+        print(f'  [LSM] Reinitialization every {self.reinit_interval} iterations (method: {self.reinit_method})')
+
+        if self.volfrac_eff > self.volfrac + 1e-12:
+            print(f'  [CONSTRAINT] Volume target increased from {self.volfrac:.4f} to {self.volfrac_eff:.4f} to keep support/load regions solid.')
+
+        for it in range(n_iter):
+            # 1. Enforce volume constraint by shifting phi
+            self._enforce_volume()
+
+            # 2. Compute density from level-set via regularized Heaviside
+            rho = self._heaviside_density()
+
+            # Apply optional projection
+            if self.member_projector is not None:
+                self.member_projector.set_beta(self._projection_beta(it))
+                rho = self.member_projector.apply(rho, target_volume=self.volfrac_eff, rho_min=self.rho_min)
+            else:
+                rho = self.filter.apply_density(rho)
+            self._enforce_passive_on_rho(rho)
+
+            # Physical density for FEA (SIMP interpolation for smooth void regions)
+            rho_phys = np.clip(self.rho_min + (1.0 - self.rho_min) * rho, self.rho_min, 1.0)
+            self._enforce_passive_on_rho(rho_phys)
+
+            # 3. Solve FEA
+            u = self.fea.solve(rho_phys, forces, fixed_dofs, self.penalty)
+            compliance = float(self.fea.calculate_compliance(u, rho_phys, self.penalty))
+            compliance_history.append(compliance)
+
+            # 4. Compute shape derivative velocity
+            velocity = self._shape_derivative_velocity(u, rho_phys)
+
+            # Weight velocity by Heaviside derivative (localize to interface)
+            delta_h = self._heaviside_derivative()
+            delta_max = float(np.max(delta_h))
+            if delta_max > 1e-30:
+                # Normalize delta to [0, 1] range and use as weight
+                weight = delta_h / delta_max
+                # Keep update mostly interface-local to avoid speckled void nucleation.
+                if self.nucleation_weight_floor > 0.0:
+                    weight = np.maximum(weight, self.nucleation_weight_floor)
+                velocity = velocity * weight
+
+            if self.velocity_smooth_passes > 0:
+                velocity = self._smooth_field_on_graph(velocity, passes=self.velocity_smooth_passes)
+
+            # Normalize velocity
+            vel_norm = float(np.max(np.abs(velocity)))
+            if vel_norm > 1e-30:
+                velocity = velocity / vel_norm
+
+            # Zero out velocity on passive elements
+            if np.any(self.passive_solid):
+                velocity[self.passive_solid] = 0.0
+
+            # 5. Evolve phi via Hamilton-Jacobi PDE
+            self._upwind_hj_update(velocity)
+            self._smooth_phi()
+
+            # Connectivity guard: prevent isolated void nucleation.
+            try:
+                if prev_rho is not None:
+                    prev_solid = (prev_rho >= 0.5)
+                    prev_void = ~prev_solid
+                    rho_after = self._heaviside_density()
+                    new_void = (~(rho_after >= 0.5)) & prev_solid
+                    if new_void.any():
+                        allow = np.zeros_like(new_void, dtype=bool)
+                        for idx in np.where(new_void)[0].tolist():
+                            nbrs = self.elem_neighbors[int(idx)]
+                            if nbrs.size and np.any(prev_void[nbrs]):
+                                allow[idx] = True
+                        revert_idx = np.where(new_void & (~allow) & (~self.passive_solid))[0]
+                        if revert_idx.size > 0:
+                            eps = max(self.epsilon * self.filter_radius, 1e-12)
+                            self.phi[revert_idx] = eps * 1.1
+                            self._enforce_passive_on_phi()
+            except Exception:
+                pass
+
+            # 6. Periodic reinitialization to signed distance
+            if self.reinit_interval > 0 and ((it + 1) % self.reinit_interval == 0):
+                self._fast_marching_reinit()
+
+            # 7. Convergence tracking
+            max_vm = 0.0
+            violate_frac = 0.0
+            if self.use_stress_constraint:
+                vm = self.fea.calculate_stress_all_gauss(u, rho_phys, self.penalty)
+                max_vm = float(np.max(vm)) if vm.size else 0.0
+                violation = np.maximum(vm / max(self.allowable_stress, 1e-12) - 1.0, 0.0)
+                violate_frac = float(np.mean(violation > 0.0)) if violation.size else 0.0
+
+            rho_change = float(np.max(np.abs(rho - prev_rho))) if prev_rho is not None else np.inf
+            comp_rel = abs(compliance - prev_comp) / max(abs(compliance), 1e-12) if prev_comp is not None else np.inf
+            prev_rho = rho.copy()
+            prev_comp = compliance
+
+            if (it + 1) >= self.min_iterations and rho_change < self.change_tol and comp_rel < self.comp_tol:
+                stable_count += 1
+            else:
+                stable_count = 0
+
+            vol = float(np.mean(rho))
+            if visualizer is not None:
+                try:
+                    rho_vis = np.where(rho >= 0.5, 1.0, self.rho_min)
+                    self._enforce_passive_on_rho(rho_vis)
+                    visualizer.update(it, rho_vis.copy(), compliance, vol)
+                except Exception as e:
+                    print(f'  [VIEWER] {e}')
+
+            if self.use_stress_constraint:
+                print(f'  Iteration {it + 1}: C={compliance:.6e}, V={vol:.4f}, dR={rho_change:.3e}, '
+                      f'VMmax={max_vm:.3e} Pa, Viol={100.0 * violate_frac:.1f}%')
+            else:
+                print(f'  Iteration {it + 1}: C={compliance:.6e}, V={vol:.4f}, dR={rho_change:.3e}')
+
+            if stable_count >= self.stall_patience:
+                print(f'  [CONVERGED] Objective stabilized for {self.stall_patience} iterations; stopping at {it + 1}.')
+                break
+
+        return self._binary_projection(), compliance_history
+
+
+
