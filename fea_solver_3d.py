@@ -1,5 +1,5 @@
 import numpy as np
-from scipy.sparse import coo_matrix
+from scipy.sparse import coo_matrix, csc_matrix
 from scipy.sparse.linalg import spsolve, cg
 
 try:
@@ -48,6 +48,7 @@ class FEASolver3D:
 
         self._ke_unit = self._precompute_unit_stiffness()
         self._bm_centroid, self._det_centroid = self._precompute_centroid_b()
+        self._precompute_assembly_map()
 
         self.linear_solver_mode = 'auto'
         self.iterative_solver_dof_threshold = 50000
@@ -320,10 +321,49 @@ class FEASolver3D:
         scale = float(self.material.get_density_scale(float(np.asarray(rho, dtype=np.float64)[int(elem_idx)]), penalty))
         return self._ke_unit[int(elem_idx)] * scale
 
+    def _precompute_assembly_map(self):
+        """Precompute CSC sparsity structure and scatter map for O(n) assembly.
+
+        Called once at init. Eliminates expensive COO->CSR->CSC conversion
+        that was taking ~80s per iteration.
+        """
+        rows = self._row_ind
+        cols = self._col_ind
+        n_coo = len(rows)
+
+        # Sort by (col, row) for CSC column-major ordering
+        sort_order = np.lexsort((rows, cols))
+        sorted_rows = rows[sort_order]
+        sorted_cols = cols[sort_order]
+
+        # Find unique (col, row) pairs
+        pair_keys = sorted_cols.astype(np.int64) * np.int64(self.n_dofs) + sorted_rows.astype(np.int64)
+        _, first_occ, inverse_sorted = np.unique(pair_keys, return_index=True, return_inverse=True)
+
+        nnz = len(first_occ)
+        u_rows = sorted_rows[first_occ].astype(np.int32)
+        u_cols = sorted_cols[first_occ]
+
+        # Build CSC indptr from column counts
+        col_counts = np.bincount(u_cols, minlength=self.n_dofs)
+        indptr = np.zeros(self.n_dofs + 1, dtype=np.int64)
+        np.cumsum(col_counts, out=indptr[1:])
+
+        # Scatter map: original COO index -> CSC data slot
+        self._asm_scatter = np.empty(n_coo, dtype=np.int64)
+        self._asm_scatter[sort_order] = inverse_sorted
+        self._asm_csc_indptr = indptr
+        self._asm_csc_indices = u_rows
+        self._asm_nnz = nnz
+
     def assemble_global_stiffness(self, rho, penalty=3.0):
         scale = self._element_modulus(rho, penalty)
-        data = (self._ke_unit.reshape(self.n_elements, -1) * scale[:, None]).reshape(-1)
-        return coo_matrix((data, (self._row_ind, self._col_ind)), shape=(self.n_dofs, self.n_dofs)).tocsr()
+        coo_data = (self._ke_unit.reshape(self.n_elements, -1) * scale[:, None]).reshape(-1)
+        csc_data = np.bincount(self._asm_scatter, weights=coo_data, minlength=self._asm_nnz)
+        return csc_matrix(
+            (csc_data, self._asm_csc_indices, self._asm_csc_indptr),
+            shape=(self.n_dofs, self.n_dofs), copy=False
+        )
 
     def _direct_solve(self, k_ff, f_f):
         """Direct solve using cholmod (preferred) or spsolve (fallback).
