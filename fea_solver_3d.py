@@ -355,36 +355,54 @@ class FEASolver3D:
                 self._cholmod_factor_shape = None
         return spsolve(k_ff, f_f)
 
+    def _apply_bc_penalty(self, k_csc, forces, fixed_dofs):
+        """Apply boundary conditions via penalty method on the full matrix.
+
+        Much faster than submatrix extraction k[free][:, free] which is O(nnz).
+        Adds large diagonal values at fixed DOFs to enforce u=0.
+        """
+        f = np.asarray(forces, dtype=np.float64).copy()
+        fixed = np.asarray(fixed_dofs, dtype=np.int64)
+        if fixed.size > 0:
+            diag_vals = np.abs(k_csc.diagonal())
+            big = float(np.max(diag_vals[diag_vals > 0])) * 1e8 if np.any(diag_vals > 0) else 1e20
+            f[fixed] = 0.0
+            # Add penalty to diagonal of fixed DOFs
+            penalty_data = np.full(fixed.size, big, dtype=np.float64)
+            penalty_mat = coo_matrix(
+                (penalty_data, (fixed, fixed)),
+                shape=(self.n_dofs, self.n_dofs)
+            ).tocsc()
+            k_bc = k_csc + penalty_mat
+        else:
+            k_bc = k_csc
+        return k_bc, f
+
     def solve(self, rho, forces, fixed_dofs, penalty=3.0):
         k = self.assemble_global_stiffness(rho, penalty)
 
-        # Cache free_dofs computation (fixed_dofs rarely change within optimization)
+        # Cache fixed_dofs key for cholmod invalidation
         fd_key = (fixed_dofs.tobytes() if hasattr(fixed_dofs, 'tobytes') else bytes(fixed_dofs))
         if self._cached_free_dofs_key != fd_key:
             self._cached_free_dofs = np.setdiff1d(np.arange(self.n_dofs), fixed_dofs)
             self._cached_free_dofs_key = fd_key
-            # Invalidate cholmod cache when BCs change
             self._cholmod_factor = None
             self._cholmod_factor_shape = None
-        free_dofs = self._cached_free_dofs
-
-        f_f = np.asarray(forces, dtype=np.float64)[free_dofs]
 
         mode = str(getattr(self, 'linear_solver_mode', 'auto')).lower()
         use_iterative = False
-        n_free = len(free_dofs)
+        n_free = len(self._cached_free_dofs)
         if mode in ('iterative', 'cg', 'cg-amg', 'cg_amg'):
             use_iterative = True
         elif mode == 'auto':
             use_iterative = (n_free >= int(getattr(self, 'iterative_solver_dof_threshold', 50000)))
 
-        # Extract submatrix — convert to CSC for cholmod path
         if use_iterative:
+            # Iterative path still uses submatrix (CG needs smaller system)
+            free_dofs = self._cached_free_dofs
             k_ff = k[free_dofs][:, free_dofs].tocsr()
-        else:
-            k_ff = k[free_dofs][:, free_dofs].tocsc()
+            f_f = np.asarray(forces, dtype=np.float64)[free_dofs]
 
-        if use_iterative:
             M = None
             if bool(getattr(self, 'use_pyamg_preconditioner', True)) and _HAS_PYAMG:
                 try:
@@ -393,7 +411,6 @@ class FEASolver3D:
                 except Exception:
                     M = None
 
-            # Warm-start: use previous displacement as initial guess
             x0 = None
             if self._last_u is not None:
                 try:
@@ -416,18 +433,23 @@ class FEASolver3D:
                     ws = ' (warm-started)' if x0 is not None else ''
                     print(f'  [SOLVER] Using iterative {msg} linear solve path{ws}.')
                     self._solver_notice_printed = True
+                u = np.zeros(self.n_dofs, dtype=np.float64)
+                u[free_dofs] = u_f
             else:
                 if not self._solver_notice_printed:
                     print('  [SOLVER] Iterative solve did not converge, falling back to direct.')
                     self._solver_notice_printed = True
-                k_ff_csc = k_ff.tocsc() if k_ff.format != 'csc' else k_ff
-                u_f = self._direct_solve(k_ff_csc, f_f)
+                # Fall back to penalty method direct solve
+                k_bc, f_bc = self._apply_bc_penalty(k.tocsc(), forces, fixed_dofs)
+                u = self._direct_solve(k_bc, f_bc)
         else:
-            u_f = self._direct_solve(k_ff, f_f)
+            # Direct path: penalty method avoids expensive submatrix extraction
+            k_bc, f_bc = self._apply_bc_penalty(k.tocsc(), forces, fixed_dofs)
+            u = self._direct_solve(k_bc, f_bc)
+            if not self._solver_notice_printed:
+                print('  [SOLVER] Using penalty-method BC application (no submatrix extraction).')
 
-        u = np.zeros(self.n_dofs, dtype=np.float64)
-        u[free_dofs] = u_f
-        self._last_u = u.copy()  # Store for warm-starting next solve
+        self._last_u = u.copy()
         return u
 
     def calculate_compliance(self, u, rho, penalty=3.0):
