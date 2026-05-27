@@ -568,12 +568,13 @@ class UnifiedWorkflowGUI:
                     u = np.asarray(self._stress_displacement, dtype=np.float64)
                     u3 = u.reshape(-1, 3)
 
-                    # Auto-scale: make max displacement ~5-10% of model bounding box
+                    # Auto-scale: make max displacement ~2% of model bounding box
+                    # Capped at 200x to avoid extreme distortion that looks "crashed"
                     bbox = np.max(self.nodes, axis=0) - np.min(self.nodes, axis=0)
                     model_size = float(np.linalg.norm(bbox))
                     max_disp = float(np.max(np.linalg.norm(u3, axis=1)))
                     if max_disp > 1e-20:
-                        scale_factor = 0.08 * model_size / max_disp
+                        scale_factor = min(0.02 * model_size / max_disp, 200.0)
                     else:
                         scale_factor = 1.0
 
@@ -885,7 +886,7 @@ class UnifiedWorkflowGUI:
                     model_size = float(np.linalg.norm(bbox))
                     max_disp = float(np.max(np.linalg.norm(u3, axis=1)))
                     if max_disp > 1e-20:
-                        scale_factor = 0.08 * model_size / max_disp
+                        scale_factor = min(0.02 * model_size / max_disp, 200.0)
                     else:
                         scale_factor = 1.0
 
