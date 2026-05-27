@@ -414,7 +414,7 @@ class UnifiedWorkflowGUI:
                 u3 = u.reshape(-1, 3)
                 disp_mag = np.linalg.norm(u3, axis=1)
                 max_disp = float(np.max(disp_mag))
-                disp_info = f'\nMax displacement: {max_disp:.3e} m'
+                disp_info = f'\nMax displacement: {max_disp:.3e}'
 
             # Suggest volume fraction based on stress distribution
             # Elements below 20% of max stress are generally safe to remove
@@ -677,7 +677,7 @@ class UnifiedWorkflowGUI:
                 u3 = u.reshape(-1, 3)
                 disp_mag = np.linalg.norm(u3, axis=1)
                 max_disp = float(np.max(disp_mag))
-                disp_info = f'\nMax displacement: {max_disp:.3e} m'
+                disp_info = f'\nMax displacement: {max_disp:.3e}'
 
             # Safety margin
             sf_margin = allowable / max(max_vm_post, 1e-12)
@@ -1605,11 +1605,12 @@ class UnifiedWorkflowGUI:
                 mesh = pv.PolyData(self.nodes, faces_pv)
             elif n_per in (4, 10):
                 n_elem = self.elements.shape[0]
+                vtk_tet_type = 24 if n_per == 10 else 10  # VTK_QUADRATIC_TETRA vs VTK_TETRA
                 cells = np.hstack([
-                    np.full((n_elem, 1), 10, dtype=np.int64),
+                    np.full((n_elem, 1), n_per, dtype=np.int64),
                     self.elements.astype(np.int64)
                 ]).ravel()
-                celltypes = np.full(n_elem, 24, dtype=np.uint8)
+                celltypes = np.full(n_elem, vtk_tet_type, dtype=np.uint8)
                 mesh = pv.UnstructuredGrid(cells, celltypes, self.nodes)
             elif n_per == 3:
                 n_elem = self.elements.shape[0]
@@ -2282,13 +2283,8 @@ class UnifiedWorkflowGUI:
             disp = np.linalg.norm(uu, axis=1)
             max_disp = float(np.max(disp)) if disp.size else 0.0
 
-            max_vm = 0.0
-            n_elem = int(self._original_elements.shape[0])
-            for e in range(n_elem):
-                _, vm = fea.calculate_stress(u, e, rho_bin, pen)
-                vmf = float(vm)
-                if vmf > max_vm:
-                    max_vm = vmf
+            vm_all = fea.calculate_stress_all_gauss(u, rho_bin, pen)
+            max_vm = float(np.max(vm_all)) if vm_all.size else 0.0
 
             ys = float(getattr(self.material, 'yield_strength', self.config.get('yield_strength', 250e6)))
             sf = float(self.config.get('safety_factor', 1.5))
@@ -2338,6 +2334,13 @@ class UnifiedWorkflowGUI:
         return ys / max(sf, 1e-12)
 
     def _compute_mass_report(self, rho):
+        """Compute mass report with automatic unit-scale detection.
+
+        CAD files typically use mm coordinates, but material density is in
+        kg/m³ (SI).  We detect the coordinate system by checking the bounding
+        box diagonal: if it exceeds 0.5 (unlikely in metres for typical parts),
+        we assume mm and convert volumes from mm³ → m³ (factor 1e-9).
+        """
         try:
             rr = np.asarray(rho, dtype=np.float64)
             elems = np.asarray(self._original_elements, dtype=np.int64)
@@ -2352,9 +2355,21 @@ class UnifiedWorkflowGUI:
             d = nodes[corners[:, 3]]
             vol = np.abs(np.einsum('ij,ij->i', np.cross(b - a, c - a), d - a)) / 6.0
 
+            # Auto-detect coordinate units.
+            # If the bounding box diagonal is > 0.5, coordinates are almost
+            # certainly in mm (a 0.5 m part is 500 mm; most CAD exports use mm).
+            bbox_diag = float(np.linalg.norm(
+                np.max(nodes, axis=0) - np.min(nodes, axis=0)))
+            if bbox_diag > 0.5:
+                # Coordinates are in mm → volumes are in mm³ → convert to m³
+                vol_scale = 1e-9
+            else:
+                # Coordinates already in metres
+                vol_scale = 1.0
+
             mat_rho = float(getattr(self.material, 'density', self.config.get('material_density', 7800.0)))
-            mass_baseline = float(np.sum(vol) * mat_rho)
-            mass_current = float(np.sum(vol * np.clip(rr, 0.0, 1.0)) * mat_rho)
+            mass_baseline = float(np.sum(vol) * vol_scale * mat_rho)
+            mass_current = float(np.sum(vol * np.clip(rr, 0.0, 1.0)) * vol_scale * mat_rho)
             saved_pct = 100.0 * max(0.0, mass_baseline - mass_current) / max(mass_baseline, 1e-12)
 
             return {

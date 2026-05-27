@@ -307,7 +307,7 @@ class SIMP3DOptimizer:
         uu = np.asarray(u, dtype=np.float64)
         rho_eff = np.maximum(np.asarray(rho, dtype=np.float64), self.rho_min)
         E_all = np.array([self.material.get_modulus(float(r), self.penalty) for r in rho_eff], dtype=np.float64)
-        D = self.fea._d_unit
+        D = self.fea._d_base
 
         # 1. Build adjoint RHS: ∂PN/∂u  (assembled over all elements)
         adjoint_rhs = np.zeros(self.fea.n_dofs, dtype=np.float64)
