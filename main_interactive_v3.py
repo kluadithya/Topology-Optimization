@@ -924,7 +924,7 @@ class InteractiveTopologyOptimizer:
     def _export_step(self, step_path, nodes, triangles):
         # Primary path: gmsh surface classification usually produces a cleaner unified shell.
         try:
-            import gmsh
+            import gmsh  # type: ignore
             with tempfile.NamedTemporaryFile(suffix='.stl', delete=False) as tf:
                 temp_stl = tf.name
 
@@ -958,12 +958,12 @@ class InteractiveTopologyOptimizer:
 
         # Fallback path: write faceted STEP directly with pythonocc.
         try:
-            from OCC.Core.BRep import BRep_Builder
-            from OCC.Core.TopoDS import TopoDS_Compound
-            from OCC.Core.BRepBuilderAPI import BRepBuilderAPI_MakePolygon, BRepBuilderAPI_MakeFace
-            from OCC.Core.gp import gp_Pnt
-            from OCC.Core.STEPControl import STEPControl_Writer, STEPControl_AsIs
-            from OCC.Core.IFSelect import IFSelect_RetDone
+            from OCC.Core.BRep import BRep_Builder  # type: ignore
+            from OCC.Core.TopoDS import TopoDS_Compound  # type: ignore
+            from OCC.Core.BRepBuilderAPI import BRepBuilderAPI_MakePolygon, BRepBuilderAPI_MakeFace  # type: ignore
+            from OCC.Core.gp import gp_Pnt  # type: ignore
+            from OCC.Core.STEPControl import STEPControl_Writer, STEPControl_AsIs  # type: ignore
+            from OCC.Core.IFSelect import IFSelect_RetDone  # type: ignore
 
             builder = BRep_Builder()
             compound = TopoDS_Compound()

@@ -9,6 +9,13 @@ except Exception:
     pyamg = None
     _HAS_PYAMG = False
 
+try:
+    from sksparse.cholmod import cholesky as cholmod_cholesky
+    _HAS_CHOLMOD = True
+except Exception:
+    cholmod_cholesky = None
+    _HAS_CHOLMOD = False
+
 
 class FEASolver3D:
     """3D linear-elastic FEA solver for Tet4 and Tet10 elements."""
@@ -48,6 +55,7 @@ class FEASolver3D:
         self.iterative_solver_maxiter = 2000
         self.use_pyamg_preconditioner = True
         self._solver_notice_printed = False
+        self._last_u = None  # Warm-start for iterative solver
 
     def configure_linear_solver(self, mode='auto', iterative_threshold_dofs=50000,
                                 cg_tol=1e-8, cg_maxiter=2000, use_pyamg=True):
@@ -153,7 +161,67 @@ class FEASolver3D:
         dN_xyz = inv_j @ dN_nat
         return cls._build_b_matrix(dN_xyz), det_j
 
+    def _batch_b_tet10(self, elem_coords, r, s, t):
+        """Vectorized B-matrix computation for all Tet10 elements at natural coords (r,s,t).
+
+        Returns (B_all, det_J, valid) where B_all is (n_elem, 6, 30).
+        """
+        n_elem = elem_coords.shape[0]
+        dN_nat = self._shape_derivatives_nat_tet10(r, s, t)  # (3, 10)
+        J_all = np.einsum('ij,ejk->eik', dN_nat, elem_coords)  # (n_elem, 3, 3)
+        det_J = np.linalg.det(J_all)
+        valid = np.abs(det_J) >= 1e-14
+
+        inv_J = np.zeros_like(J_all)
+        if np.any(valid):
+            inv_J[valid] = np.linalg.inv(J_all[valid])
+
+        dN_xyz = np.einsum('eij,jk->eik', inv_J, dN_nat)  # (n_elem, 3, 10)
+
+        B_all = np.zeros((n_elem, 6, 30), dtype=np.float64)
+        for i in range(10):
+            c = 3 * i
+            B_all[:, 0, c]     = dN_xyz[:, 0, i]
+            B_all[:, 1, c + 1] = dN_xyz[:, 1, i]
+            B_all[:, 2, c + 2] = dN_xyz[:, 2, i]
+            B_all[:, 3, c]     = dN_xyz[:, 1, i]
+            B_all[:, 3, c + 1] = dN_xyz[:, 0, i]
+            B_all[:, 4, c + 1] = dN_xyz[:, 2, i]
+            B_all[:, 4, c + 2] = dN_xyz[:, 1, i]
+            B_all[:, 5, c]     = dN_xyz[:, 2, i]
+            B_all[:, 5, c + 2] = dN_xyz[:, 0, i]
+        return B_all, det_J, valid
+
+    def _batch_b_tet4(self, elem_coords):
+        """Vectorized B-matrix computation for all Tet4 elements (centroid)."""
+        n_elem = elem_coords.shape[0]
+        dN_nat = self._shape_derivatives_nat_tet4()  # (3, 4)
+        J_all = np.einsum('ij,ejk->eik', dN_nat, elem_coords)
+        det_J = np.linalg.det(J_all)
+        valid = np.abs(det_J) >= 1e-14
+
+        inv_J = np.zeros_like(J_all)
+        if np.any(valid):
+            inv_J[valid] = np.linalg.inv(J_all[valid])
+
+        dN_xyz = np.einsum('eij,jk->eik', inv_J, dN_nat)  # (n_elem, 3, 4)
+
+        B_all = np.zeros((n_elem, 6, 12), dtype=np.float64)
+        for i in range(4):
+            c = 3 * i
+            B_all[:, 0, c]     = dN_xyz[:, 0, i]
+            B_all[:, 1, c + 1] = dN_xyz[:, 1, i]
+            B_all[:, 2, c + 2] = dN_xyz[:, 2, i]
+            B_all[:, 3, c]     = dN_xyz[:, 1, i]
+            B_all[:, 3, c + 1] = dN_xyz[:, 0, i]
+            B_all[:, 4, c + 1] = dN_xyz[:, 2, i]
+            B_all[:, 4, c + 2] = dN_xyz[:, 1, i]
+            B_all[:, 5, c]     = dN_xyz[:, 2, i]
+            B_all[:, 5, c + 2] = dN_xyz[:, 0, i]
+        return B_all, det_J, valid
+
     def _compute_unit_element_stiffness(self, elem_idx):
+        """Per-element stiffness (kept as fallback for single-element queries)."""
         elem = self.elements[int(elem_idx)]
 
         if self.npe == 4:
@@ -167,15 +235,9 @@ class FEASolver3D:
             return ke
 
         coords = self.nodes[elem]
-        # 5-point Keast rule -- integrates up to degree 3 exactly.
-        # The negative central weight is inherent to the Keast formulation
-        # and does not affect accuracy for well-shaped elements.
         gps = [
-            (0.25, 0.25, 0.25),
-            (1.0/6, 1.0/6, 1.0/6),
-            (1.0/6, 1.0/6, 0.5),
-            (1.0/6, 0.5, 1.0/6),
-            (0.5, 1.0/6, 1.0/6),
+            (0.25, 0.25, 0.25), (1.0/6, 1.0/6, 1.0/6),
+            (1.0/6, 1.0/6, 0.5), (1.0/6, 0.5, 1.0/6), (0.5, 1.0/6, 1.0/6),
         ]
         gw = [-2.0/15.0, 3.0/40.0, 3.0/40.0, 3.0/40.0, 3.0/40.0]
 
@@ -193,85 +255,57 @@ class FEASolver3D:
     def _precompute_unit_stiffness(self):
         """Precompute unit stiffness matrices for all elements.
 
-        For Tet4: fully vectorized using batched NumPy operations (10-50x faster).
-        For Tet10: per-element loop with 5-point Gauss quadrature.
+        Both Tet4 and Tet10 are fully vectorized using batched NumPy operations.
         """
         ke_unit = np.zeros((self.n_elements, self.dof_per_elem, self.dof_per_elem), dtype=np.float64)
+        eye_fallback = np.eye(self.dof_per_elem, dtype=np.float64)[None, :, :] * 1e-12
 
         if self.npe == 4:
-            # Vectorized Tet4: compute all Jacobians, B-matrices, and ke simultaneously
-            dN_nat = self._shape_derivatives_nat_tet4()  # (3, 4) — constant for all Tet4
-            elem_coords = self.nodes[self.elements[:, :4]]  # (n_elem, 4, 3)
-
-            # Jacobians: J[e] = dN_nat @ coords[e] -> (n_elem, 3, 3)
-            # dN_nat is (3, 4), elem_coords is (n_elem, 4, 3)
-            J_all = np.einsum('ij,ejk->eik', dN_nat, elem_coords)
-            det_J = np.linalg.det(J_all)  # (n_elem,)
-
-            # Identify valid (non-degenerate) elements
-            valid = np.abs(det_J) >= 1e-14
-
-            # Inverse Jacobians for valid elements
-            inv_J = np.zeros_like(J_all)
-            inv_J[valid] = np.linalg.inv(J_all[valid])
-
-            # dN/dxyz = inv_J @ dN_nat -> (n_elem, 3, 4)
-            dN_xyz = np.einsum('eij,jk->eik', inv_J, dN_nat)
-
-            # Build B-matrices in batch: (n_elem, 6, 12)
-            B_all = np.zeros((self.n_elements, 6, 12), dtype=np.float64)
-            for i in range(4):
-                ii = 3 * i
-                B_all[:, 0, ii]     = dN_xyz[:, 0, i]  # dN/dx
-                B_all[:, 1, ii + 1] = dN_xyz[:, 1, i]  # dN/dy
-                B_all[:, 2, ii + 2] = dN_xyz[:, 2, i]  # dN/dz
-                B_all[:, 3, ii]     = dN_xyz[:, 1, i]   # dN/dy
-                B_all[:, 3, ii + 1] = dN_xyz[:, 0, i]   # dN/dx
-                B_all[:, 4, ii + 1] = dN_xyz[:, 2, i]   # dN/dz
-                B_all[:, 4, ii + 2] = dN_xyz[:, 1, i]   # dN/dy
-                B_all[:, 5, ii]     = dN_xyz[:, 2, i]   # dN/dz
-                B_all[:, 5, ii + 2] = dN_xyz[:, 0, i]   # dN/dx
-
-            # ke = B^T @ D @ B * |det_J| / 6 — batched via einsum
-            DB = np.einsum('ij,ejk->eik', self._d_base, B_all)           # (n_elem, 6, 12)
-            ke_batch = np.einsum('eji,ejk->eik', B_all, DB)              # (n_elem, 12, 12)
+            B_all, det_J, valid = self._batch_b_tet4(self.nodes[self.elements[:, :4]])
+            DB = np.einsum('ij,ejk->eik', self._d_base, B_all)
+            ke_batch = np.einsum('eji,ejk->eik', B_all, DB)
             ke_batch *= (np.abs(det_J) / 6.0)[:, None, None]
-
-            # Assign valid elements; invalid get tiny diagonal
             ke_unit[valid] = ke_batch[valid]
-            invalid = ~valid
-            if np.any(invalid):
-                ke_unit[invalid] = np.eye(self.dof_per_elem, dtype=np.float64)[None, :, :] * 1e-12
-
-            # Sanity check: zero out non-finite entries
-            bad = ~np.all(np.isfinite(ke_unit), axis=(1, 2))
-            if np.any(bad):
-                ke_unit[bad] = np.eye(self.dof_per_elem, dtype=np.float64)[None, :, :] * 1e-12
-
+            if np.any(~valid):
+                ke_unit[~valid] = eye_fallback
         else:
-            # Tet10: per-element loop (Gauss quadrature required)
-            for elem_idx in range(self.n_elements):
-                ke_unit[elem_idx] = self._compute_unit_element_stiffness(elem_idx)
+            # Vectorized Tet10: batch all elements per Gauss point
+            elem_coords = self.nodes[self.elements]  # (n_elem, 10, 3)
+            gps = [
+                (0.25, 0.25, 0.25), (1.0/6, 1.0/6, 1.0/6),
+                (1.0/6, 1.0/6, 0.5), (1.0/6, 0.5, 1.0/6), (0.5, 1.0/6, 1.0/6),
+            ]
+            gw = [-2.0/15.0, 3.0/40.0, 3.0/40.0, 3.0/40.0, 3.0/40.0]
+            any_valid = np.zeros(self.n_elements, dtype=bool)
 
+            for (r, s, t), w in zip(gps, gw):
+                B_gp, det_J, valid = self._batch_b_tet10(elem_coords, r, s, t)
+                any_valid |= valid
+                DB = np.einsum('ij,ejk->eik', self._d_base, B_gp)
+                ke_gp = np.einsum('eji,ejk->eik', B_gp, DB)
+                ke_gp *= (np.abs(det_J) * w)[:, None, None]
+                ke_unit += ke_gp
+
+            if np.any(~any_valid):
+                ke_unit[~any_valid] = eye_fallback
+
+        bad = ~np.all(np.isfinite(ke_unit), axis=(1, 2))
+        if np.any(bad):
+            ke_unit[bad] = eye_fallback
         return ke_unit
 
     def _precompute_centroid_b(self):
+        """Vectorized centroid B-matrix precomputation for all elements."""
         bm_all = np.zeros((self.n_elements, 6, self.dof_per_elem), dtype=np.float64)
         det_all = np.zeros(self.n_elements, dtype=np.float64)
 
-        for elem_idx in range(self.n_elements):
-            elem = self.elements[elem_idx]
-            if self.npe == 4:
-                coords4 = self.nodes[elem[:4]]
-                bm, det_j = self._b_matrix_tet4(coords4)
-            else:
-                coords = self.nodes[elem]
-                bm, det_j = self._b_matrix_tet10(coords, 0.25, 0.25, 0.25)
+        if self.npe == 4:
+            B_all, det_J, valid = self._batch_b_tet4(self.nodes[self.elements[:, :4]])
+        else:
+            B_all, det_J, valid = self._batch_b_tet10(self.nodes[self.elements], 0.25, 0.25, 0.25)
 
-            if bm is not None and abs(det_j) >= 1e-14:
-                bm_all[elem_idx] = bm
-                det_all[elem_idx] = det_j
-
+        bm_all[valid] = B_all[valid]
+        det_all[valid] = det_J[valid]
         return bm_all, det_all
 
     def _element_modulus(self, rho, penalty):
@@ -286,6 +320,20 @@ class FEASolver3D:
         scale = self._element_modulus(rho, penalty)
         data = (self._ke_unit.reshape(self.n_elements, -1) * scale[:, None]).reshape(-1)
         return coo_matrix((data, (self._row_ind, self._col_ind)), shape=(self.n_dofs, self.n_dofs)).tocsr()
+
+    def _direct_solve(self, k_ff, f_f):
+        """Direct solve using cholmod (preferred) or spsolve (fallback)."""
+        if _HAS_CHOLMOD:
+            try:
+                factor = cholmod_cholesky(k_ff)
+                u_f = factor(f_f)
+                if np.all(np.isfinite(u_f)):
+                    if not self._solver_notice_printed:
+                        print('  [SOLVER] Using CHOLMOD direct solver.')
+                    return u_f
+            except Exception:
+                pass
+        return spsolve(k_ff, f_f)
 
     def solve(self, rho, forces, fixed_dofs, penalty=3.0):
         k = self.assemble_global_stiffness(rho, penalty)
@@ -309,28 +357,40 @@ class FEASolver3D:
                 except Exception:
                     M = None
 
+            # Warm-start: use previous displacement as initial guess
+            x0 = None
+            if self._last_u is not None:
+                try:
+                    x0_full = self._last_u[free_dofs]
+                    if x0_full.shape[0] == f_f.shape[0] and np.all(np.isfinite(x0_full)):
+                        x0 = x0_full
+                except Exception:
+                    x0 = None
+
             tol = float(getattr(self, 'iterative_solver_tol', 1e-8))
             maxiter = int(getattr(self, 'iterative_solver_maxiter', 2000))
             try:
-                u_f, info = cg(k_ff, f_f, tol=tol, maxiter=maxiter, M=M)
+                u_f, info = cg(k_ff, f_f, x0=x0, tol=tol, maxiter=maxiter, M=M)
             except TypeError:
-                u_f, info = cg(k_ff, f_f, rtol=tol, atol=0.0, maxiter=maxiter, M=M)
+                u_f, info = cg(k_ff, f_f, x0=x0, rtol=tol, atol=0.0, maxiter=maxiter, M=M)
 
             if info == 0 and np.all(np.isfinite(u_f)):
                 if not self._solver_notice_printed:
                     msg = 'CG+AMG' if (M is not None) else 'CG'
-                    print(f'  [SOLVER] Using iterative {msg} linear solve path.')
+                    ws = ' (warm-started)' if x0 is not None else ''
+                    print(f'  [SOLVER] Using iterative {msg} linear solve path{ws}.')
                     self._solver_notice_printed = True
             else:
                 if not self._solver_notice_printed:
-                    print('  [SOLVER] Iterative solve did not converge, falling back to direct spsolve.')
+                    print('  [SOLVER] Iterative solve did not converge, falling back to direct.')
                     self._solver_notice_printed = True
-                u_f = spsolve(k_ff, f_f)
+                u_f = self._direct_solve(k_ff, f_f)
         else:
-            u_f = spsolve(k_ff, f_f)
+            u_f = self._direct_solve(k_ff, f_f)
 
         u = np.zeros(self.n_dofs, dtype=np.float64)
         u[free_dofs] = u_f
+        self._last_u = u.copy()  # Store for warm-starting next solve
         return u
 
     def calculate_compliance(self, u, rho, penalty=3.0):
@@ -431,34 +491,23 @@ class FEASolver3D:
                                     + 6.0 * (txy**2 + tyz**2 + tzx**2)))
             vm_all[~valid] = 0.0
         else:
-            # Tet10: evaluate at 5 Keast Gauss points (degree 3), keep max per element
+            # Vectorized Tet10: batch all elements per Gauss point, keep max VM
+            elem_coords = self.nodes[self.elements]  # (n_elem, 10, 3)
+            ue_all = uu[self.elem_dofs]  # (n_elem, 30)
             gps = [
-                (0.25, 0.25, 0.25),
-                (1.0/6, 1.0/6, 1.0/6),
-                (1.0/6, 1.0/6, 0.5),
-                (1.0/6, 0.5, 1.0/6),
-                (0.5, 1.0/6, 1.0/6),
+                (0.25, 0.25, 0.25), (1.0/6, 1.0/6, 1.0/6),
+                (1.0/6, 1.0/6, 0.5), (1.0/6, 0.5, 1.0/6), (0.5, 1.0/6, 1.0/6),
             ]
-
-            for e in range(self.n_elements):
-                ue = uu[self.elem_dofs[e]]
-                coords = self.nodes[self.elements[e]]
-                emod = scale_all[e]
-
-                for r, s, t in gps:
-                    bm, det_j = self._b_matrix_tet10(coords, r, s, t)
-                    if bm is None or abs(det_j) < 1e-14:
-                        continue
-                    strain = bm @ ue
-                    stress = (self._d_base * emod) @ strain
-                    sx, sy, sz = stress[0], stress[1], stress[2]
-                    txy, tyz, tzx = stress[3], stress[4], stress[5]
-                    vm = float(np.sqrt(0.5 * (
-                        (sx - sy) ** 2 + (sy - sz) ** 2 + (sz - sx) ** 2
-                        + 6.0 * (txy ** 2 + tyz ** 2 + tzx ** 2)
-                    )))
-                    if vm > vm_all[e]:
-                        vm_all[e] = vm
+            for r, s, t in gps:
+                B_gp, det_J, valid = self._batch_b_tet10(elem_coords, r, s, t)
+                strain = np.einsum('eij,ej->ei', B_gp, ue_all)  # (n_elem, 6)
+                stress = np.einsum('ij,ej->ei', self._d_base, strain) * scale_all[:, None]
+                sx, sy, sz = stress[:, 0], stress[:, 1], stress[:, 2]
+                txy, tyz, tzx = stress[:, 3], stress[:, 4], stress[:, 5]
+                vm_gp = np.sqrt(0.5 * ((sx - sy)**2 + (sy - sz)**2 + (sz - sx)**2
+                                       + 6.0 * (txy**2 + tyz**2 + tzx**2)))
+                vm_gp[~valid] = 0.0
+                vm_all = np.maximum(vm_all, vm_gp)
 
         return vm_all
 

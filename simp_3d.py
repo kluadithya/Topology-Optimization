@@ -119,7 +119,8 @@ class SIMP3DOptimizer:
         npe = int(elems.shape[1])
         self.elem_dofs = (3 * elems[:, :, None] + np.arange(3, dtype=np.int64)).reshape(self.n_elements, 3 * npe)
         rho_probe = np.ones(self.n_elements, dtype=np.float64)
-        self.ke0 = np.stack([self.fea.get_element_stiffness(i, rho_probe, penalty=1.0) for i in range(self.n_elements)], axis=0)
+        scale_at_1 = float(self.material.get_density_scale(1.0, 1.0))
+        self.ke0 = self.fea._ke_unit * scale_at_1
 
         self.npe = int(elems.shape[1])
         dflt_interval = 5 if self.npe >= 10 else 1
