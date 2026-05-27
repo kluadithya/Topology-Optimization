@@ -122,6 +122,7 @@ class UnifiedWorkflowGUI:
         self._post_stress_actor = None      # PyVista actor for post-opt stress heatmap
         self._post_deformed_actor = None    # PyVista actor for post-opt deformed shape
         self._reopt_count = 0               # how many times user has re-optimized
+        self._cached_fea_solver = None       # Cached FEA solver to avoid redundant precomputation
 
         self._opt_queue = queue.Queue()
         self._opt_done = threading.Event()
@@ -454,10 +455,38 @@ class UnifiedWorkflowGUI:
         print('  Press N to proceed to optimization, B to go back to BCs.')
         print('  ========================================================\n')
 
-    def _run_stress_analysis(self):
-        """Run static FEA with full-density elements and compute per-element stress."""
+    def _get_or_create_fea_solver(self):
+        """Return a cached FEA solver, creating one if needed.
+
+        Avoids redundant precomputation of unit stiffness matrices,
+        centroid B-matrices, and assembly scatter maps between stages.
+        """
         from fea_solver_3d import FEASolver3D
 
+        if self._cached_fea_solver is not None:
+            # Verify the cached solver still matches the current mesh
+            if (self._cached_fea_solver.n_nodes == self._original_nodes.shape[0] and
+                    self._cached_fea_solver.n_elements == self._original_elements.shape[0]):
+                return self._cached_fea_solver
+
+        fea = FEASolver3D(self._original_nodes, self._original_elements, self.material)
+        # Configure solver with user settings (was previously missing,
+        # causing CG to fail and spsolve to hang on large meshes)
+        try:
+            fea.configure_linear_solver(
+                mode=self.config.get('linear_solver', 'auto'),
+                iterative_threshold_dofs=int(self.config.get('iterative_solver_dof_threshold', 50000)),
+                cg_tol=float(self.config.get('iterative_solver_tol', 1e-8)),
+                cg_maxiter=int(self.config.get('iterative_solver_maxiter', 2000)),
+                use_pyamg=bool(self.config.get('use_pyamg_preconditioner', True)),
+            )
+        except Exception:
+            pass
+        self._cached_fea_solver = fea
+        return fea
+
+    def _run_stress_analysis(self):
+        """Run static FEA with full-density elements and compute per-element stress."""
         print('  [STRESS] Running static FEA with full-density elements...')
 
         # Build BCs
@@ -468,8 +497,8 @@ class UnifiedWorkflowGUI:
         n_elem = int(self._original_elements.shape[0])
         rho_full = np.ones(n_elem, dtype=np.float64)
 
-        # Create FEA solver
-        fea = FEASolver3D(self._original_nodes, self._original_elements, self.material)
+        # Use cached FEA solver (avoids redundant precomputation)
+        fea = self._get_or_create_fea_solver()
         pen = float(self.config.get('penalization', self.config.get('penalty', 3.0)))
 
         # Solve
@@ -756,8 +785,6 @@ class UnifiedWorkflowGUI:
 
     def _run_post_opt_stress_analysis(self):
         """Run static FEA on the optimized (binarized) design."""
-        from fea_solver_3d import FEASolver3D
-
         print('  [POST-STRESS] Running static FEA on optimized design...')
 
         if self.rho_result is None:
@@ -783,8 +810,8 @@ class UnifiedWorkflowGUI:
         n_total = len(rho_bin)
         print(f'  [POST-STRESS] Binary design: {n_solid}/{n_total} solid elements (cutoff={thr:.3f})')
 
-        # Create FEA solver and solve
-        fea = FEASolver3D(self._original_nodes, self._original_elements, self.material)
+        # Reuse cached FEA solver (avoids redundant precomputation)
+        fea = self._get_or_create_fea_solver()
         pen = float(self.config.get('penalization', self.config.get('penalty', 3.0)))
         u = fea.solve(rho_bin, forces, fixed_dofs, pen)
         self._post_stress_displacement = u.copy()
