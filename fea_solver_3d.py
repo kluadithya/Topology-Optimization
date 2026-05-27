@@ -51,7 +51,7 @@ class FEASolver3D:
         self._precompute_assembly_map()
 
         self.linear_solver_mode = 'auto'
-        self.iterative_solver_dof_threshold = 50000
+        self.iterative_solver_dof_threshold = 20000
         self.iterative_solver_tol = 1e-8
         self.iterative_solver_maxiter = 2000
         self.use_pyamg_preconditioner = True
@@ -438,49 +438,39 @@ class FEASolver3D:
             use_iterative = (n_free >= int(getattr(self, 'iterative_solver_dof_threshold', 50000)))
 
         if use_iterative:
-            # Iterative path still uses submatrix (CG needs smaller system)
-            free_dofs = self._cached_free_dofs
-            k_ff = k[free_dofs][:, free_dofs].tocsr()
-            f_f = np.asarray(forces, dtype=np.float64)[free_dofs]
+            # Apply BCs via penalty method (avoids slow submatrix extraction)
+            k_bc, f_bc = self._apply_bc_penalty(k, forces, fixed_dofs)
+            k_bc_csr = k_bc.tocsr()
 
             M = None
             if bool(getattr(self, 'use_pyamg_preconditioner', True)) and _HAS_PYAMG:
                 try:
-                    ml = pyamg.smoothed_aggregation_solver(k_ff)
+                    ml = pyamg.smoothed_aggregation_solver(k_bc_csr)
                     M = ml.aspreconditioner()
                 except Exception:
                     M = None
 
-            x0 = None
-            if self._last_u is not None:
-                try:
-                    x0_full = self._last_u[free_dofs]
-                    if x0_full.shape[0] == f_f.shape[0] and np.all(np.isfinite(x0_full)):
-                        x0 = x0_full
-                except Exception:
-                    x0 = None
+            x0 = self._last_u if self._last_u is not None else None
+            if x0 is not None and (x0.shape[0] != f_bc.shape[0] or not np.all(np.isfinite(x0))):
+                x0 = None
 
             tol = float(getattr(self, 'iterative_solver_tol', 1e-8))
             maxiter = int(getattr(self, 'iterative_solver_maxiter', 2000))
             try:
-                u_f, info = cg(k_ff, f_f, x0=x0, tol=tol, maxiter=maxiter, M=M)
+                u, info = cg(k_bc_csr, f_bc, x0=x0, tol=tol, maxiter=maxiter, M=M)
             except TypeError:
-                u_f, info = cg(k_ff, f_f, x0=x0, rtol=tol, atol=0.0, maxiter=maxiter, M=M)
+                u, info = cg(k_bc_csr, f_bc, x0=x0, rtol=tol, atol=0.0, maxiter=maxiter, M=M)
 
-            if info == 0 and np.all(np.isfinite(u_f)):
+            if info == 0 and np.all(np.isfinite(u)):
                 if not self._solver_notice_printed:
                     msg = 'CG+AMG' if (M is not None) else 'CG'
                     ws = ' (warm-started)' if x0 is not None else ''
-                    print(f'  [SOLVER] Using iterative {msg} linear solve path{ws}.')
+                    print(f'  [SOLVER] Using iterative {msg} with penalty BCs{ws}.')
                     self._solver_notice_printed = True
-                u = np.zeros(self.n_dofs, dtype=np.float64)
-                u[free_dofs] = u_f
             else:
                 if not self._solver_notice_printed:
                     print('  [SOLVER] Iterative solve did not converge, falling back to direct.')
                     self._solver_notice_printed = True
-                # Fall back to penalty method direct solve
-                k_bc, f_bc = self._apply_bc_penalty(k.tocsc(), forces, fixed_dofs)
                 u = self._direct_solve(k_bc, f_bc)
         else:
             # Direct path: penalty method avoids expensive submatrix extraction
