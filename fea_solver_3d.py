@@ -56,6 +56,10 @@ class FEASolver3D:
         self.use_pyamg_preconditioner = True
         self._solver_notice_printed = False
         self._last_u = None  # Warm-start for iterative solver
+        self._cholmod_factor = None  # Cached cholmod symbolic factorization
+        self._cholmod_factor_shape = None
+        self._cached_free_dofs = None  # Cached free DOF indices
+        self._cached_free_dofs_key = None
 
     def configure_linear_solver(self, mode='auto', iterative_threshold_dofs=50000,
                                 cg_tol=1e-8, cg_maxiter=2000, use_pyamg=True):
@@ -322,31 +326,63 @@ class FEASolver3D:
         return coo_matrix((data, (self._row_ind, self._col_ind)), shape=(self.n_dofs, self.n_dofs)).tocsr()
 
     def _direct_solve(self, k_ff, f_f):
-        """Direct solve using cholmod (preferred) or spsolve (fallback)."""
+        """Direct solve using cholmod (preferred) or spsolve (fallback).
+
+        Caches the cholmod symbolic factorization so subsequent solves with
+        the same sparsity pattern only redo the numeric factorization.
+        """
         if _HAS_CHOLMOD:
             try:
-                factor = cholmod_cholesky(k_ff)
-                u_f = factor(f_f)
+                k_csc = k_ff if hasattr(k_ff, 'format') and k_ff.format == 'csc' else k_ff.tocsc()
+                # Reuse symbolic factorization if sparsity pattern hasn't changed
+                if (self._cholmod_factor is not None and
+                        self._cholmod_factor_shape == k_csc.shape):
+                    try:
+                        self._cholmod_factor.cholesky_inplace(k_csc)
+                    except Exception:
+                        self._cholmod_factor = cholmod_cholesky(k_csc)
+                        self._cholmod_factor_shape = k_csc.shape
+                else:
+                    self._cholmod_factor = cholmod_cholesky(k_csc)
+                    self._cholmod_factor_shape = k_csc.shape
+                u_f = self._cholmod_factor(f_f)
                 if np.all(np.isfinite(u_f)):
                     if not self._solver_notice_printed:
-                        print('  [SOLVER] Using CHOLMOD direct solver.')
+                        print('  [SOLVER] Using CHOLMOD direct solver (cached symbolic factorization).')
                     return u_f
             except Exception:
-                pass
+                self._cholmod_factor = None
+                self._cholmod_factor_shape = None
         return spsolve(k_ff, f_f)
 
     def solve(self, rho, forces, fixed_dofs, penalty=3.0):
         k = self.assemble_global_stiffness(rho, penalty)
-        free_dofs = np.setdiff1d(np.arange(self.n_dofs), fixed_dofs)
-        k_ff = k[free_dofs][:, free_dofs].tocsr()
+
+        # Cache free_dofs computation (fixed_dofs rarely change within optimization)
+        fd_key = (fixed_dofs.tobytes() if hasattr(fixed_dofs, 'tobytes') else bytes(fixed_dofs))
+        if self._cached_free_dofs_key != fd_key:
+            self._cached_free_dofs = np.setdiff1d(np.arange(self.n_dofs), fixed_dofs)
+            self._cached_free_dofs_key = fd_key
+            # Invalidate cholmod cache when BCs change
+            self._cholmod_factor = None
+            self._cholmod_factor_shape = None
+        free_dofs = self._cached_free_dofs
+
         f_f = np.asarray(forces, dtype=np.float64)[free_dofs]
 
         mode = str(getattr(self, 'linear_solver_mode', 'auto')).lower()
         use_iterative = False
+        n_free = len(free_dofs)
         if mode in ('iterative', 'cg', 'cg-amg', 'cg_amg'):
             use_iterative = True
         elif mode == 'auto':
-            use_iterative = (k_ff.shape[0] >= int(getattr(self, 'iterative_solver_dof_threshold', 50000)))
+            use_iterative = (n_free >= int(getattr(self, 'iterative_solver_dof_threshold', 50000)))
+
+        # Extract submatrix — convert to CSC for cholmod path
+        if use_iterative:
+            k_ff = k[free_dofs][:, free_dofs].tocsr()
+        else:
+            k_ff = k[free_dofs][:, free_dofs].tocsc()
 
         if use_iterative:
             M = None
@@ -384,7 +420,8 @@ class FEASolver3D:
                 if not self._solver_notice_printed:
                     print('  [SOLVER] Iterative solve did not converge, falling back to direct.')
                     self._solver_notice_printed = True
-                u_f = self._direct_solve(k_ff, f_f)
+                k_ff_csc = k_ff.tocsc() if k_ff.format != 'csc' else k_ff
+                u_f = self._direct_solve(k_ff_csc, f_f)
         else:
             u_f = self._direct_solve(k_ff, f_f)
 
