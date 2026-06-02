@@ -302,8 +302,7 @@ def pnorm_stress(vm_stresses, sigma_allow, pn=8.0):
     # Derivative: d(PN_corrected)/d(vm_i) = correction * d(PN_raw)/d(vm_i)
     pn_norm = pn_raw / sa
     if pn_norm > 1e-30:
-        dpn_dvm = correction * (pn_raw / sa) * (ratio_safe / pn_norm) ** (p - 1.0) / max(n, 1)
-        dpn_dvm = dpn_dvm / sa  # chain rule: d/d(vm) instead of d/d(ratio)
+        dpn_dvm = correction * pn_norm ** (1.0 - p) * ratio_safe ** (p - 1.0) / max(n, 1)
     else:
         dpn_dvm = np.zeros_like(vm)
 

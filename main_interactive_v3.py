@@ -1144,6 +1144,32 @@ class InteractiveTopologyOptimizer:
         print('  [AUTO] Density threshold is derived from target volume/weight objective.')
         print(f'  [AUTO] Threshold set to {thr:.3f}')
 
+    def _run_verification_fea_if_available(self):
+        """Run verification FEA on binary-thresholded design if optimizer supports it."""
+        if not self.results or 'rho_optimized' not in self.results:
+            return
+        if self.forces is None or self.fixed_dofs is None:
+            return
+
+        # Only SIMP optimizer has run_verification_fea
+        try:
+            from simp_3d import SIMP3DOptimizer
+        except ImportError:
+            return
+
+        if self.optimization_method != 'SIMP':
+            print('[INFO] Verification FEA is currently available for SIMP method only.')
+            return
+
+        try:
+            threshold = float(self.config.get('threshold', 0.5))
+            # Reconstruct a lightweight optimizer to access verification
+            optimizer = SIMP3DOptimizer(self.nodes, self.elements, self.material, self.config)
+            optimizer.rho = np.asarray(self.results['rho_optimized'], dtype=np.float64)
+            verification = optimizer.run_verification_fea(self.forces, self.fixed_dofs, threshold=threshold)
+            self.results['verification'] = verification
+        except Exception as e:
+            print(f'[WARNING] Verification FEA failed: {e}')
 
     def run_interactive_workflow(self):
         """Run workflow"""
@@ -1171,6 +1197,7 @@ class InteractiveTopologyOptimizer:
         if self.run_unified_gui_workflow():
             self._sync_auto_density_threshold()
             self.show_results()
+            self._run_verification_fea_if_available()
             self.export_optimized_design()
         
         self.print_section('WORKFLOW COMPLETE')

@@ -487,6 +487,8 @@ class UnifiedWorkflowGUI:
 
     def _run_stress_analysis(self):
         """Run static FEA with full-density elements and compute per-element stress."""
+        import time as _time
+        t0 = _time.perf_counter()
         print('  [STRESS] Running static FEA with full-density elements...')
 
         # Build BCs
@@ -499,20 +501,24 @@ class UnifiedWorkflowGUI:
 
         # Use cached FEA solver (avoids redundant precomputation)
         fea = self._get_or_create_fea_solver()
+        t1 = _time.perf_counter()
         pen = float(self.config.get('penalization', self.config.get('penalty', 3.0)))
 
         # Solve
         u = fea.solve(rho_full, forces, fixed_dofs, pen)
         self._stress_displacement = u.copy()
+        t2 = _time.perf_counter()
 
         # Compute per-element von Mises stress
         print('  [STRESS] Computing per-element von Mises stress...')
         vm_all = fea.calculate_stress_all_gauss(u, rho_full, pen)
         self._stress_vm_all = vm_all
+        t3 = _time.perf_counter()
 
         max_vm = float(np.max(vm_all)) if len(vm_all) > 0 else 0.0
         mean_vm = float(np.mean(vm_all)) if len(vm_all) > 0 else 0.0
         print(f'  [STRESS] Done. Max VM={max_vm:.3e} Pa, Mean VM={mean_vm:.3e} Pa')
+        print(f'  [STRESS] Timing: init={t1-t0:.2f}s, solve={t2-t1:.2f}s, stress={t3-t2:.2f}s, total={t3-t0:.2f}s')
 
     def _draw_stress_heatmap(self):
         """Draw per-element von Mises stress heatmap with deformed shape overlay."""

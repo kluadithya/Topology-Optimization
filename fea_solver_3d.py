@@ -240,11 +240,12 @@ class FEASolver3D:
             return ke
 
         coords = self.nodes[elem]
-        gps = [
-            (0.25, 0.25, 0.25), (1.0/6, 1.0/6, 1.0/6),
-            (1.0/6, 1.0/6, 0.5), (1.0/6, 0.5, 1.0/6), (0.5, 1.0/6, 1.0/6),
-        ]
-        gw = [-2.0/15.0, 3.0/40.0, 3.0/40.0, 3.0/40.0, 3.0/40.0]
+        # 4-point all-positive Gauss rule (degree 2, weight sum = 1/6).
+        # Replaces the 5-point Keast rule that had a negative centroid weight
+        # (-2/15) which could cause non-positive-definite ke on distorted elements.
+        a1, a2 = 0.1381966011250105, 0.5854101966249685
+        gps = [(a2, a1, a1), (a1, a2, a1), (a1, a1, a2), (a1, a1, a1)]
+        gw = [1.0/24.0, 1.0/24.0, 1.0/24.0, 1.0/24.0]
 
         ke = np.zeros((self.dof_per_elem, self.dof_per_elem), dtype=np.float64)
         for (r, s, t), w in zip(gps, gw):
@@ -276,11 +277,10 @@ class FEASolver3D:
         else:
             # Vectorized Tet10: batch all elements per Gauss point
             elem_coords = self.nodes[self.elements]  # (n_elem, 10, 3)
-            gps = [
-                (0.25, 0.25, 0.25), (1.0/6, 1.0/6, 1.0/6),
-                (1.0/6, 1.0/6, 0.5), (1.0/6, 0.5, 1.0/6), (0.5, 1.0/6, 1.0/6),
-            ]
-            gw = [-2.0/15.0, 3.0/40.0, 3.0/40.0, 3.0/40.0, 3.0/40.0]
+            # 4-point all-positive Gauss rule (degree 2, weight sum = 1/6)
+            a1, a2 = 0.1381966011250105, 0.5854101966249685
+            gps = [(a2, a1, a1), (a1, a2, a1), (a1, a1, a2), (a1, a1, a1)]
+            gw = [1.0/24.0, 1.0/24.0, 1.0/24.0, 1.0/24.0]
             any_valid = np.zeros(self.n_elements, dtype=bool)
 
             for (r, s, t), w in zip(gps, gw):
@@ -425,7 +425,11 @@ class FEASolver3D:
         return k_bc, f
 
     def solve(self, rho, forces, fixed_dofs, penalty=3.0):
+        import time as _time
+        t_start = _time.perf_counter()
+
         k = self.assemble_global_stiffness(rho, penalty)
+        t_asm = _time.perf_counter()
 
         # Cache fixed_dofs key for cholmod invalidation
         fd_key = (fixed_dofs.tobytes() if hasattr(fixed_dofs, 'tobytes') else bytes(fixed_dofs))
@@ -444,46 +448,61 @@ class FEASolver3D:
             use_iterative = (n_free >= int(getattr(self, 'iterative_solver_dof_threshold', 50000)))
 
         if use_iterative:
-            # Apply BCs via penalty method (avoids slow submatrix extraction)
-            k_bc, f_bc = self._apply_bc_penalty(k, forces, fixed_dofs)
-            k_bc_csr = k_bc.tocsr()
+            # Use free-DOF submatrix for CG (well-conditioned, κ ≈ 10³-10⁴).
+            # Penalty BCs create κ ≈ 10⁸ which prevents CG convergence.
+            free = self._cached_free_dofs
+            k_ff = k.tocsr()[free][:, free].tocsr()
+            f_f = np.asarray(forces, dtype=np.float64)[free]
+            t_bc = _time.perf_counter()
 
             M = None
             if bool(getattr(self, 'use_pyamg_preconditioner', True)) and _HAS_PYAMG:
                 try:
-                    ml = pyamg.smoothed_aggregation_solver(k_bc_csr)
+                    ml = pyamg.smoothed_aggregation_solver(k_ff)
                     M = ml.aspreconditioner()
                 except Exception:
                     M = None
 
-            x0 = self._last_u if self._last_u is not None else None
-            if x0 is not None and (x0.shape[0] != f_bc.shape[0] or not np.all(np.isfinite(x0))):
-                x0 = None
+            x0 = None
+            if self._last_u is not None:
+                x0_full = self._last_u
+                if x0_full.shape[0] == self.n_dofs and np.all(np.isfinite(x0_full)):
+                    x0 = x0_full[free]
 
             tol = float(getattr(self, 'iterative_solver_tol', 1e-8))
             maxiter = int(getattr(self, 'iterative_solver_maxiter', 2000))
             try:
-                u, info = cg(k_bc_csr, f_bc, x0=x0, tol=tol, maxiter=maxiter, M=M)
+                u_f, info = cg(k_ff, f_f, x0=x0, tol=tol, maxiter=maxiter, M=M)
             except TypeError:
-                u, info = cg(k_bc_csr, f_bc, x0=x0, rtol=tol, atol=0.0, maxiter=maxiter, M=M)
+                u_f, info = cg(k_ff, f_f, x0=x0, rtol=tol, atol=0.0, maxiter=maxiter, M=M)
 
-            if info == 0 and np.all(np.isfinite(u)):
+            if info == 0 and np.all(np.isfinite(u_f)):
+                u = np.zeros(self.n_dofs, dtype=np.float64)
+                u[free] = u_f
                 if not self._solver_notice_printed:
                     msg = 'CG+AMG' if (M is not None) else 'CG'
                     ws = ' (warm-started)' if x0 is not None else ''
-                    print(f'  [SOLVER] Using iterative {msg} with penalty BCs{ws}.')
+                    print(f'  [SOLVER] Using iterative {msg} with free-DOF extraction{ws}.')
                     self._solver_notice_printed = True
             else:
                 if not self._solver_notice_printed:
                     print('  [SOLVER] Iterative solve did not converge, falling back to direct.')
                     self._solver_notice_printed = True
+                # Direct fallback: use penalty method (fast for CHOLMOD/spsolve)
+                k_bc, f_bc = self._apply_bc_penalty(k.tocsc(), forces, fixed_dofs)
                 u = self._direct_solve(k_bc, f_bc)
         else:
             # Direct path: penalty method avoids expensive submatrix extraction
             k_bc, f_bc = self._apply_bc_penalty(k.tocsc(), forces, fixed_dofs)
+            t_bc = _time.perf_counter()
             u = self._direct_solve(k_bc, f_bc)
             if not self._solver_notice_printed:
                 print('  [SOLVER] Using penalty-method BC application (no submatrix extraction).')
+
+        t_solve = _time.perf_counter()
+        if not self._solver_notice_printed:
+            print(f'  [SOLVER] Timing: assembly={t_asm-t_start:.2f}s, BC+precond={t_bc-t_asm:.2f}s, solve={t_solve-t_bc:.2f}s, total={t_solve-t_start:.2f}s')
+            self._solver_notice_printed = True
 
         self._last_u = u.copy()
         return u
@@ -529,15 +548,10 @@ class FEASolver3D:
             # Tet4: constant strain — single evaluation is exact
             return self.calculate_stress(u, elem_idx, rho, penalty)
 
-        # Tet10: evaluate at all 5 Keast Gauss points (degree 3)
+        # Tet10: evaluate at all 4 Gauss points (degree 2, all-positive weights)
         coords = self.nodes[elem]
-        gps = [
-            (0.25, 0.25, 0.25),
-            (1.0/6, 1.0/6, 1.0/6),
-            (1.0/6, 1.0/6, 0.5),
-            (1.0/6, 0.5, 1.0/6),
-            (0.5, 1.0/6, 1.0/6),
-        ]
+        a1, a2 = 0.1381966011250105, 0.5854101966249685
+        gps = [(a2, a1, a1), (a1, a2, a1), (a1, a1, a2), (a1, a1, a1)]
 
         max_vm = 0.0
         max_stress = np.zeros(6, dtype=np.float64)
@@ -589,10 +603,9 @@ class FEASolver3D:
             # Vectorized Tet10: batch all elements per Gauss point, keep max VM
             elem_coords = self.nodes[self.elements]  # (n_elem, 10, 3)
             ue_all = uu[self.elem_dofs]  # (n_elem, 30)
-            gps = [
-                (0.25, 0.25, 0.25), (1.0/6, 1.0/6, 1.0/6),
-                (1.0/6, 1.0/6, 0.5), (1.0/6, 0.5, 1.0/6), (0.5, 1.0/6, 1.0/6),
-            ]
+            # 4-point all-positive Gauss rule (degree 2)
+            a1, a2 = 0.1381966011250105, 0.5854101966249685
+            gps = [(a2, a1, a1), (a1, a2, a1), (a1, a1, a2), (a1, a1, a1)]
             for r, s, t in gps:
                 B_gp, det_J, valid = self._batch_b_tet10(elem_coords, r, s, t)
                 strain = np.einsum('eij,ej->ei', B_gp, ue_all)  # (n_elem, 6)

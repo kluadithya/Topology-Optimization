@@ -115,15 +115,15 @@ class DensityFilter3D:
         """Filter densities using sparse matrix-vector product (exact)."""
         return np.asarray(self._W @ np.asarray(values, dtype=np.float64)).ravel()
 
-    def apply_sensitivity(self, sensitivities, rho, rho_min=1e-9):
-        """Filter sensitivities using exact adjoint of weighted-average filter.
+    def apply_sensitivity(self, sensitivities, rho=None, rho_min=1e-9):
+        """Filter sensitivities using exact adjoint of the density filter.
 
-        Uses W^T @ (dc * rho) / rho instead of the Bruns-Tortorelli approximation,
-        providing the correct adjoint chain rule for the density filter.
+        The exact adjoint of ρ̂ = W·ρ is simply W^T @ dc (chain rule).
+        The previous density-weighted form W^T@(dc·ρ)/ρ was the Sigmund (1997)
+        heuristic which introduces bias on non-uniform tetrahedral meshes.
         """
         dc = np.asarray(sensitivities, dtype=np.float64)
-        rho_safe = np.maximum(np.asarray(rho, dtype=np.float64), rho_min)
-        return np.asarray(self._W.T @ (dc * rho_safe)).ravel() / rho_safe
+        return np.asarray(self._W.T @ dc).ravel()
 
 
 class MinimumMemberSizeProjection3D:

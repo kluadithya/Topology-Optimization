@@ -187,25 +187,29 @@ class SIMP3DOptimizer:
             rho[self.passive_solid] = 1.0
         return rho
 
-    def _sensitivity_analysis(self, u, rho):
+    def _sensitivity_analysis(self, u, rho, p_current=None):
+        if p_current is None:
+            p_current = self.penalty
         ue = u[self.elem_dofs]
         ce0 = np.einsum('ni,nij,nj->n', ue, self.ke0, ue)
         scale = max(1.0 - float(getattr(self.material, 'rho_min', 0.0)), 1e-12)
         rho_eff = np.maximum(rho, self.rho_min)
-        sens = -scale * self.penalty * (rho_eff ** (self.penalty - 1.0)) * ce0
+        sens = -scale * p_current * (rho_eff ** (p_current - 1.0)) * ce0
 
         # ke0 is assembled at rho=1.0, so element stiffness scales with
         # (rho_min + (1-rho_min)*rho^penalty) for SIMP material interpolation.
-        comp_scale = float(getattr(self.material, 'rho_min', 0.0)) + scale * (rho_eff ** self.penalty)
+        comp_scale = float(getattr(self.material, 'rho_min', 0.0)) + scale * (rho_eff ** p_current)
         compliance = float(np.sum(comp_scale * ce0))
 
         sens_f = self.filter.apply_sensitivity(sens, rho, rho_min=self.rho_min)
         return sens_f, compliance
 
-    def _stress_constraint_scale(self, u, rho):
+    def _stress_constraint_scale(self, u, rho, p_current=None):
         """Compute stress constraint scaling using Gauss-point evaluation and p-norm aggregation."""
+        if p_current is None:
+            p_current = self.penalty
         # Use Gauss-point stress evaluation for accurate peak stress capture
-        vm = self.fea.calculate_stress_all_gauss(u, rho, self.penalty)
+        vm = self.fea.calculate_stress_all_gauss(u, rho, p_current)
 
         # P-norm stress aggregation for smooth differentiable constraint
         if self.use_pnorm_stress:
@@ -298,96 +302,76 @@ class SIMP3DOptimizer:
         self._enforce_passive_solid(rho_new)
         return rho_new
 
-    def _compute_adjoint_stress_sensitivity(self, u, rho, dpn_dvm, vm):
-        """Compute exact stress constraint gradient via adjoint method.
+    def _compute_adjoint_stress_sensitivity(self, u, rho, dpn_dvm, vm, p_current=None):
+        """Compute exact stress constraint gradient via adjoint method (vectorized).
 
         Solves K·λ = ∂PN/∂u  (adjoint system), then computes per-element:
           ∂PN/∂ρ_e = dE/dρ_e · [∂σ_vm/∂σ^T · D · B_e · u_e · dpn_dvm_e  −  λ_e^T · K_e0 · u_e]
-        which captures both direct modulus and displacement-mediated effects.
+        Fully vectorized — replaces original Python for-loops over n_elements.
         """
+        if p_current is None:
+            p_current = self.penalty
         uu = np.asarray(u, dtype=np.float64)
         rho_eff = np.maximum(np.asarray(rho, dtype=np.float64), self.rho_min)
-        E_all = np.array([self.material.get_modulus(float(r), self.penalty) for r in rho_eff], dtype=np.float64)
+        rho_min_mat = float(getattr(self.material, 'rho_min', 0.0))
+        E_all = (rho_min_mat + (1.0 - rho_min_mat) * (rho_eff ** p_current)) * self.material.E0
         D = self.fea._d_base
 
-        # 1. Build adjoint RHS: ∂PN/∂u  (assembled over all elements)
+        valid = (np.abs(self.fea._det_centroid) >= 1e-14) & (dpn_dvm > 1e-30)
+        B_all = self.fea._bm_centroid
+        ue_all = uu[self.fea.elem_dofs]
+
+        # Step 1: Vectorized adjoint RHS
+        strain_all = np.einsum('eij,ej->ei', B_all, ue_all)
+        stress_all = np.einsum('ij,ej->ei', D, strain_all) * E_all[:, None]
+
+        sx, sy, sz = stress_all[:, 0], stress_all[:, 1], stress_all[:, 2]
+        txy, tyz, tzx = stress_all[:, 3], stress_all[:, 4], stress_all[:, 5]
+        vm_all = np.sqrt(np.maximum(0.5 * ((sx-sy)**2 + (sy-sz)**2 + (sz-sx)**2
+                                           + 6.0*(txy**2 + tyz**2 + tzx**2)), 1e-60))
+
+        inv_2vm = 1.0 / (2.0 * vm_all)
+        dvm_ds_all = np.column_stack([
+            (2*sx - sy - sz) * inv_2vm,
+            (2*sy - sx - sz) * inv_2vm,
+            (2*sz - sx - sy) * inv_2vm,
+            3.0 * txy / vm_all,
+            3.0 * tyz / vm_all,
+            3.0 * tzx / vm_all,
+        ])
+
+        weighted_dvm = dvm_ds_all * dpn_dvm[:, None]
+        inner = np.einsum('ij,ej->ei', D, weighted_dvm) * E_all[:, None]
+        rhs_per_elem = np.einsum('eji,ej->ei', B_all, inner)
+        rhs_per_elem[~valid] = 0.0
+
         adjoint_rhs = np.zeros(self.fea.n_dofs, dtype=np.float64)
-        for e in range(self.n_elements):
-            if abs(self.fea._det_centroid[e]) < 1e-14 or dpn_dvm[e] < 1e-30:
-                continue
-            B_e = self.fea._bm_centroid[e]   # (6, dof_per_elem)
-            u_e = uu[self.fea.elem_dofs[e]]
+        np.add.at(adjoint_rhs, self.fea.elem_dofs, rhs_per_elem)
 
-            # Stress and von Mises at centroid
-            strain = B_e @ u_e
-            stress = (E_all[e] * D) @ strain
-            sx, sy, sz = stress[0], stress[1], stress[2]
-            txy, tyz, tzx = stress[3], stress[4], stress[5]
-            vm_e = float(np.sqrt(0.5 * ((sx-sy)**2 + (sy-sz)**2 + (sz-sx)**2
-                                        + 6.0*(txy**2 + tyz**2 + tzx**2))))
-            if vm_e < 1e-30:
-                continue
+        # Step 2: Solve adjoint system
+        lam = self.fea.solve(rho, adjoint_rhs, self._fixed_dofs, p_current)
 
-            # ∂σ_vm/∂σ  (6-vector)
-            dvm_ds = np.array([
-                (2*sx - sy - sz) / (2*vm_e),
-                (2*sy - sx - sz) / (2*vm_e),
-                (2*sz - sx - sy) / (2*vm_e),
-                3.0*txy / vm_e,
-                3.0*tyz / vm_e,
-                3.0*tzx / vm_e,
-            ], dtype=np.float64)
+        # Step 3: Vectorized per-element sensitivity
+        mat_scale = max(1.0 - rho_min_mat, 1e-12)
+        dE_drho = mat_scale * p_current * (rho_eff ** (p_current - 1.0)) * self.material.E0
 
-            # Contribution: B_e^T · (E_e · D) · dvm_ds · dpn_dvm[e]
-            rhs_e = B_e.T @ ((E_all[e] * D) @ (dvm_ds * dpn_dvm[e]))
-            adjoint_rhs[self.fea.elem_dofs[e]] += rhs_e
-
-        # 2. Solve adjoint system: K · λ = adjoint_rhs
-        lam = self.fea.solve(rho, adjoint_rhs, self._fixed_dofs, self.penalty)
-
-        # 3. Per-element sensitivity: direct + displacement-mediated terms
-        scale = max(1.0 - float(getattr(self.material, 'rho_min', 0.0)), 1e-12)
-        dE_drho = scale * self.penalty * (rho_eff ** (self.penalty - 1.0)) * self.material.E0
-
-        dstress_drho = np.zeros(self.n_elements, dtype=np.float64)
         lam_arr = np.asarray(lam, dtype=np.float64)
-        for e in range(self.n_elements):
-            u_e = uu[self.fea.elem_dofs[e]]
-            lam_e = lam_arr[self.fea.elem_dofs[e]]
+        lam_all = lam_arr[self.fea.elem_dofs]
 
-            # Direct term: dpn_dvm[e] · dvm_ds^T · (dE/dρ / E) · σ_e  (simplified via chain rule)
-            # Indirect term: -λ_e^T · (dE/dρ · K_e0) · u_e
-            ke0_u = self.ke0[e] @ u_e
-            indirect = -lam_e @ (dE_drho[e] * ke0_u)
+        ke0_u = np.einsum('eij,ej->ei', self.ke0, ue_all)
+        indirect = -np.einsum('ei,ei->e', lam_all, ke0_u) * dE_drho
 
-            # Exact direct term: dpn_dvm[e] · dvm_ds^T · (dE/dρ/E_e) · σ_e
-            # Uses the full tensor chain rule instead of the scalar approximation.
-            direct = 0.0
-            if abs(self.fea._det_centroid[e]) >= 1e-14 and E_all[e] > 1e-30:
-                B_e = self.fea._bm_centroid[e]
-                strain_e = B_e @ u_e
-                sigma_explicit = (E_all[e] * D) @ strain_e
-                sx, sy, sz = sigma_explicit[0], sigma_explicit[1], sigma_explicit[2]
-                txy, tyz, tzx = sigma_explicit[3], sigma_explicit[4], sigma_explicit[5]
-                vm_e_local = float(np.sqrt(0.5 * ((sx-sy)**2 + (sy-sz)**2 + (sz-sx)**2
-                                                   + 6.0*(txy**2 + tyz**2 + tzx**2))))
-                if vm_e_local > 1e-30:
-                    dvm_ds_local = np.array([
-                        (2*sx - sy - sz) / (2*vm_e_local),
-                        (2*sy - sx - sz) / (2*vm_e_local),
-                        (2*sz - sx - sy) / (2*vm_e_local),
-                        3.0*txy / vm_e_local,
-                        3.0*tyz / vm_e_local,
-                        3.0*tzx / vm_e_local,
-                    ], dtype=np.float64)
-                    direct = dpn_dvm[e] * (dE_drho[e] / E_all[e]) * np.dot(dvm_ds_local, sigma_explicit)
+        E_safe = np.maximum(E_all, 1e-30)
+        dvm_dot_sigma = np.einsum('ei,ei->e', dvm_ds_all, stress_all)
+        direct = dpn_dvm * (dE_drho / E_safe) * dvm_dot_sigma
+        direct[~valid | (vm_all < 1e-30)] = 0.0
 
-            dstress_drho[e] = direct + indirect
+        return direct + indirect
 
-        return dstress_drho
-
-    def _update_density_mma(self, u, sensitivities, rho, volume_constraint, iteration, compliance):
+    def _update_density_mma(self, u, sensitivities, rho, volume_constraint, iteration, compliance, p_current=None):
         """MMA-based density update with volume and optional p-norm stress constraints."""
+        if p_current is None:
+            p_current = self.penalty
         # Objective: minimize compliance
         f0val = compliance  # use actual compliance (exact)
         df0dx = sensitivities.copy()
@@ -403,13 +387,13 @@ class SIMP3DOptimizer:
 
         # Constraint 2: p-norm stress (if enabled) with adjoint sensitivity
         if self.use_stress_constraint and self.use_pnorm_stress:
-            vm = self.fea.calculate_stress_all_gauss(u, rho, self.penalty)
+            vm = self.fea.calculate_stress_all_gauss(u, rho, p_current)
             pn_value, dpn_dvm, pn_constraint = pnorm_stress(
                 vm, self.allowable_stress, pn=self.pnorm_p
             )
             self._cached_pnorm_value = pn_value
             # Adjoint-based stress sensitivity (exact gradient)
-            dstress_drho = self._compute_adjoint_stress_sensitivity(u, rho, dpn_dvm, vm)
+            dstress_drho = self._compute_adjoint_stress_sensitivity(u, rho, dpn_dvm, vm, p_current)
             constraints.append(pn_constraint)
             constraint_grads.append(dstress_drho)
 
@@ -471,7 +455,7 @@ class SIMP3DOptimizer:
             u = self.fea.solve(self.rho, forces, fixed_dofs, p_current)
             t1 = time.perf_counter()
 
-            sensitivities, compliance = self._sensitivity_analysis(u, self.rho)
+            sensitivities, compliance = self._sensitivity_analysis(u, self.rho, p_current)
             t2 = time.perf_counter()
             compliance_history.append(compliance)
             volume_fraction = float(self.rho.mean())
@@ -485,7 +469,7 @@ class SIMP3DOptimizer:
             if self.use_stress_constraint:
                 do_stress = (iteration % self.stress_eval_interval) == 0
                 if do_stress:
-                    stress_scale, max_vm, violate_frac = self._stress_constraint_scale(u, self.rho)
+                    stress_scale, max_vm, violate_frac = self._stress_constraint_scale(u, self.rho, p_current)
                     self._cached_stress_scale = stress_scale
                     self._cached_max_vm = max_vm
                     self._cached_violate_frac = violate_frac
@@ -500,7 +484,7 @@ class SIMP3DOptimizer:
                     sensitivities = sensitivities * stress_scale
 
             if self.use_mma and self.mma_solver is not None:
-                self.rho = self._update_density_mma(u, sensitivities, self.rho, self.volume_fraction_eff, iteration, compliance)
+                self.rho = self._update_density_mma(u, sensitivities, self.rho, self.volume_fraction_eff, iteration, compliance, p_current)
             else:
                 self.rho = self._update_density_oc(sensitivities, self.volume_fraction_eff, iteration)
             t4 = time.perf_counter()
@@ -538,3 +522,68 @@ class SIMP3DOptimizer:
         print('\n3D SIMP Optimization Completed')
         return self.rho, compliance_history
 
+    def run_verification_fea(self, forces, fixed_dofs, threshold=0.5):
+        """Run verification FEA on the binary-thresholded (manufacturable) design.
+
+        The optimization produces a continuous density field ρ ∈ [ρ_min, 1].
+        The manufactured part is binary: elements with ρ >= threshold are solid,
+        the rest are void. This method re-runs a full FEA on that binary design
+        to report physically meaningful compliance, displacement, and stress.
+
+        Returns
+        -------
+        dict with keys:
+            'compliance_continuous' : float  — compliance of the gray-density result
+            'compliance_binary'     : float  — compliance of the thresholded design
+            'max_disp_continuous'   : float  — max displacement (continuous)
+            'max_disp_binary'       : float  — max displacement (binary)
+            'max_vm_binary'         : float  — max von Mises stress (binary)
+            'rho_binary'            : ndarray — the binary density vector
+            'threshold'             : float  — threshold used
+        """
+        rho_cont = np.copy(self.rho)
+        rho_binary = np.where(rho_cont >= threshold, 1.0, self.rho_min)
+        self._enforce_passive_solid(rho_binary)
+
+        print(f'\n{"="*60}')
+        print(f'  Verification FEA on Binary Design (threshold={threshold:.2f})')
+        print(f'{"="*60}')
+        n_solid = int(np.sum(rho_binary >= threshold))
+        print(f'  Solid elements: {n_solid}/{self.n_elements} ({100.0*n_solid/max(self.n_elements,1):.1f}%)')
+
+        # Continuous-density result
+        u_cont = self.fea.solve(rho_cont, forces, fixed_dofs, self.penalty)
+        comp_cont = self.fea.calculate_compliance(u_cont, rho_cont, self.penalty)
+        max_disp_cont = float(np.max(np.abs(u_cont)))
+
+        # Binary-threshold result
+        u_bin = self.fea.solve(rho_binary, forces, fixed_dofs, self.penalty)
+        comp_bin = self.fea.calculate_compliance(u_bin, rho_binary, self.penalty)
+        max_disp_bin = float(np.max(np.abs(u_bin)))
+        vm_bin = self.fea.calculate_stress_all_gauss(u_bin, rho_binary, self.penalty)
+        max_vm_bin = float(np.max(vm_bin)) if vm_bin.size else 0.0
+
+        # Report comparison
+        comp_diff = 100.0 * abs(comp_bin - comp_cont) / max(abs(comp_cont), 1e-30)
+        disp_diff = 100.0 * abs(max_disp_bin - max_disp_cont) / max(abs(max_disp_cont), 1e-30)
+
+        print(f'\n  {"Metric":<25} {"Continuous":>14} {"Binary":>14} {"Diff %":>8}')
+        print(f'  {"-"*63}')
+        print(f'  {"Compliance":<25} {comp_cont:>14.4e} {comp_bin:>14.4e} {comp_diff:>7.1f}%')
+        print(f'  {"Max displacement":<25} {max_disp_cont:>14.4e} {max_disp_bin:>14.4e} {disp_diff:>7.1f}%')
+        print(f'  {"Max von Mises (binary)":<25} {"—":>14} {max_vm_bin:>14.4e}')
+        if hasattr(self, 'allowable_stress'):
+            ratio = max_vm_bin / max(self.allowable_stress, 1e-30)
+            status = 'OK' if ratio <= 1.0 else 'EXCEEDED'
+            print(f'  {"Stress ratio (σ/σ_allow)":<25} {"—":>14} {ratio:>14.3f} [{status}]')
+        print()
+
+        return {
+            'compliance_continuous': comp_cont,
+            'compliance_binary': comp_bin,
+            'max_disp_continuous': max_disp_cont,
+            'max_disp_binary': max_disp_bin,
+            'max_vm_binary': max_vm_bin,
+            'rho_binary': rho_binary,
+            'threshold': threshold,
+        }
