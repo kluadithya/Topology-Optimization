@@ -56,6 +56,14 @@ class SIMP3DOptimizer:
         else:
             self.filter_radius = float(max(config.get('filter_radius', 1.0), 1e-9))
             self.element_size = np.nan
+
+        # §4.5: Filter radius continuation — start with larger radius to prevent
+        # checkerboard, linearly reduce to target over first 50% of iterations.
+        self.filter_radius_start_factor = float(config.get('filter_radius_start_factor', 1.5))
+        self.filter_radius_target = self.filter_radius
+        self.filter_radius_initial = self.filter_radius * self.filter_radius_start_factor
+        self._filter_radius_continuation = bool(config.get('filter_radius_continuation', True))
+        self._last_filter_radius = None  # Track to avoid unnecessary filter rebuilds
         self.filter = DensityFilter3D(self.fea.nodes, self.fea.elements, self.filter_radius)
 
         self.use_min_member_projection = bool(config.get('use_min_member_projection', True))
@@ -300,6 +308,14 @@ class SIMP3DOptimizer:
             rho_new = self.filter.apply_density(rho_new)
 
         self._enforce_passive_solid(rho_new)
+
+        # §4.6: Volume correction after projection — prevent volume drift
+        actual_vol = float(np.mean(rho_new))
+        if abs(actual_vol - volume_constraint) > 0.005 and actual_vol > 1e-12:
+            rho_new *= volume_constraint / actual_vol
+            rho_new = np.clip(rho_new, self.rho_min, 1.0)
+            self._enforce_passive_solid(rho_new)
+
         return rho_new
 
     def _compute_adjoint_stress_sensitivity(self, u, rho, dpn_dvm, vm, p_current=None):
@@ -423,6 +439,14 @@ class SIMP3DOptimizer:
             rho_new = self.filter.apply_density(rho_new)
 
         self._enforce_passive_solid(rho_new)
+
+        # §4.6: Volume correction after projection — prevent volume drift
+        actual_vol = float(np.mean(rho_new))
+        if abs(actual_vol - volume_constraint) > 0.005 and actual_vol > 1e-12:
+            rho_new *= volume_constraint / actual_vol
+            rho_new = np.clip(rho_new, self.rho_min, 1.0)
+            self._enforce_passive_solid(rho_new)
+
         return rho_new
 
     def optimize(self, forces, fixed_dofs, visualizer=None):
@@ -448,6 +472,22 @@ class SIMP3DOptimizer:
             # Penalty continuation: ramp p from 1 → target over first 40% of iterations
             p_current = self._current_penalty(iteration)
 
+            # §4.5: Filter radius continuation — linearly reduce from initial
+            # to target over first 50% of iterations. Rebuild filter at discrete
+            # steps (every 10% of max_iterations) to amortize cKDTree cost.
+            if self._filter_radius_continuation and self.filter_radius_start_factor > 1.01:
+                ramp_end = int(0.50 * self.max_iterations)
+                if iteration < ramp_end:
+                    t_frac = float(iteration) / max(ramp_end, 1)
+                    r_current = self.filter_radius_initial + t_frac * (self.filter_radius_target - self.filter_radius_initial)
+                else:
+                    r_current = self.filter_radius_target
+                # Only rebuild filter at discrete steps to avoid overhead
+                step = max(1, int(0.10 * self.max_iterations))
+                if self._last_filter_radius is None or (iteration % step == 0 and abs(r_current - self._last_filter_radius) > 1e-9):
+                    self.filter = DensityFilter3D(self.fea.nodes, self.fea.elements, r_current)
+                    self._last_filter_radius = r_current
+
             print(f'\nIteration {iteration + 1} (p={p_current:.2f})')
 
             self._enforce_passive_solid(self.rho)
@@ -468,6 +508,11 @@ class SIMP3DOptimizer:
             pnorm_val = 0.0
             if self.use_stress_constraint:
                 do_stress = (iteration % self.stress_eval_interval) == 0
+                # §3.3: Skip stress evaluation in early iterations when penalty
+                # is low — stress constraints are usually inactive during the
+                # topology-forming phase and evaluating them wastes compute.
+                if iteration < int(0.30 * self.max_iterations) and p_current < 2.0:
+                    do_stress = False
                 if do_stress:
                     stress_scale, max_vm, violate_frac = self._stress_constraint_scale(u, self.rho, p_current)
                     self._cached_stress_scale = stress_scale

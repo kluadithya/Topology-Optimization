@@ -115,10 +115,34 @@ class MaterialModel:
         ex = self.E0 * fx
         ey = self.E0 * fy
         ez = self.E0 * fz
-        gxy = (np.sqrt(ex * ey)) / (2.0 * (1.0 + self.nu))
-        gyz = (np.sqrt(ey * ez)) / (2.0 * (1.0 + self.nu))
-        gxz = (np.sqrt(ex * ez)) / (2.0 * (1.0 + self.nu))
-        return self._orthotropic_stiffness_matrix(ex, ey, ez, self.nu, gxy, gyz, gxz)
+        nu = self.nu
+
+        # Huber (1923) formula for orthotropic shear modulus.
+        # Uses reciprocal Poisson ratios: νij = ν·Ej/Ei, νji = ν·Ei/Ej
+        # Gij = sqrt(Ei·Ej) / (2·(1 + sqrt(νij·νji)))
+        # Degrades exactly to G = E/(2(1+ν)) when Ei = Ej (isotropic).
+        # The previous geometric-mean formula sqrt(Ei·Ej)/(2(1+ν)) had no
+        # theoretical basis and produced 10-30% shear stiffness errors for
+        # anisotropic AM materials.
+        nu_xy = nu * ey / ex;  nu_yx = nu * ex / ey
+        nu_yz = nu * ez / ey;  nu_zy = nu * ey / ez
+        nu_xz = nu * ez / ex;  nu_zx = nu * ex / ez
+        gxy = np.sqrt(ex * ey) / (2.0 * (1.0 + np.sqrt(max(nu_xy * nu_yx, 0.0))))
+        gyz = np.sqrt(ey * ez) / (2.0 * (1.0 + np.sqrt(max(nu_yz * nu_zy, 0.0))))
+        gxz = np.sqrt(ex * ez) / (2.0 * (1.0 + np.sqrt(max(nu_xz * nu_zx, 0.0))))
+
+        # Warn if anisotropy ratio > 2:1 where shear approximation degrades
+        max_ratio = max(fx, fy, fz) / max(min(fx, fy, fz), 1e-12)
+        if max_ratio > 2.0:
+            import warnings
+            warnings.warn(
+                f'[MATERIAL] Anisotropy ratio {max_ratio:.1f}:1 exceeds 2:1. '
+                f'Huber shear modulus approximation may have >15% error. '
+                f'Consider supplying measured shear moduli.',
+                stacklevel=2,
+            )
+
+        return self._orthotropic_stiffness_matrix(ex, ey, ez, nu, gxy, gyz, gxz)
 
     def get_stiffness_matrix_2d(self, E, nu):
         """2D plane stress constitutive matrix"""

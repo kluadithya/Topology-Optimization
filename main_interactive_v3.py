@@ -579,6 +579,12 @@ class InteractiveTopologyOptimizer:
             use_gmsh = True
             gmsh_order = int(self.config.get('gmsh_element_order', 2))
             tet_label = 'Tet10' if gmsh_order >= 2 else 'Tet4'
+            # §3.6: Tet10 mesh size guidance — Tet10 needs 4-8× fewer elements
+            # than Tet4 for equivalent accuracy due to quadratic shape functions.
+            if gmsh_order >= 2 and target_tets > 15000:
+                suggested = int(target_tets / 5)
+                print(f'  [TIP] Tet10 elements capture bending 4-8× better than Tet4.')
+                print(f'  [TIP] Consider using ~{suggested} Tet10 elements instead of {target_tets} for similar accuracy but 3-4× faster iterations.')
             emit(10.0, f'Target set to {target_tets} tetra elements')
         except (ValueError, KeyboardInterrupt):
             min_tets = int(self.config.get('min_3d_elements', 1000))
@@ -1171,6 +1177,38 @@ class InteractiveTopologyOptimizer:
         except Exception as e:
             print(f'[WARNING] Verification FEA failed: {e}')
 
+    def _check_unit_consistency(self):
+        """Heuristic check for geometry/material unit consistency (§2.9).
+
+        If the bounding box extent is very large relative to E0/yield_strength
+        (which has units of length), the user likely modelled geometry in mm
+        while using Pa for material properties — causing 10^6 displacement errors.
+        """
+        if self.nodes is None or self.material is None:
+            return
+        try:
+            bb_min = np.min(self.nodes, axis=0)
+            bb_max = np.max(self.nodes, axis=0)
+            L_bb = float(np.linalg.norm(bb_max - bb_min))
+            E0 = float(self.material.E0)
+            ys = float(self.material.yield_strength)
+            if L_bb < 1e-15 or E0 < 1e-6 or ys < 1e-6:
+                return
+            L_char = E0 / ys  # dimensionless if units are consistent
+            ratio = L_bb / L_char
+            if ratio > 1e3:
+                print(f'\n  [WARNING] Bounding box diagonal = {L_bb:.3e}')
+                print(f'  [WARNING] E0 / yield_strength = {L_char:.3e}')
+                print(f'  [WARNING] Ratio = {ratio:.1e} >> 1 — geometry may be in mm while material is in Pa.')
+                print(f'  [WARNING] Ensure geometry is in metres (SI) or scale material properties to match.\n')
+            elif ratio < 1e-3:
+                print(f'\n  [WARNING] Bounding box diagonal = {L_bb:.3e}')
+                print(f'  [WARNING] E0 / yield_strength = {L_char:.3e}')
+                print(f'  [WARNING] Ratio = {ratio:.1e} << 1 — geometry may be in metres while material is in MPa.')
+                print(f'  [WARNING] Ensure consistent unit system.\n')
+        except Exception:
+            pass
+
     def run_interactive_workflow(self):
         """Run workflow"""
         self.print_banner()
@@ -1188,6 +1226,9 @@ class InteractiveTopologyOptimizer:
         while not self.setup_material_properties():
             pass
         
+        # §2.9: Unit consistency check
+        self._check_unit_consistency()
+
         # Define all optimization parameters BEFORE the GUI
         self.select_objective_function()
         while not self.configure_optimization():

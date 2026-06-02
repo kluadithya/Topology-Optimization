@@ -61,6 +61,12 @@ class FEASolver3D:
         self._cholmod_factor_shape = None
         self._cached_free_dofs = None  # Cached free DOF indices
         self._cached_free_dofs_key = None
+        self._bc_locked = False  # Lock BC after first solve (BCs don't change during optimization)
+
+        # Precompute Gauss-point B-matrices for Tet10 (§3.4)
+        self._gp_b_cache = None
+        if self.npe == 10:
+            self._precompute_gauss_point_b()
 
     def configure_linear_solver(self, mode='auto', iterative_threshold_dofs=50000,
                                 cg_tol=1e-8, cg_maxiter=2000, use_pyamg=True):
@@ -313,6 +319,29 @@ class FEASolver3D:
         det_all[valid] = det_J[valid]
         return bm_all, det_all
 
+    def _precompute_gauss_point_b(self):
+        """Cache B-matrices at all 4 Gauss points for Tet10 elements (§3.4).
+
+        Eliminates repeated Jacobian inverse computation during
+        calculate_stress_all_gauss, which is called every stress evaluation
+        iteration. Memory cost: ~5.6 MB per 1000 elements.
+        """
+        if self.npe != 10:
+            self._gp_b_cache = None
+            return
+
+        elem_coords = self.nodes[self.elements]  # (n_elem, 10, 3)
+        a1, a2 = 0.1381966011250105, 0.5854101966249685
+        gps = [(a2, a1, a1), (a1, a2, a1), (a1, a1, a2), (a1, a1, a1)]
+
+        self._gp_b_cache = []
+        for r, s, t in gps:
+            B_gp, det_J, valid = self._batch_b_tet10(elem_coords, r, s, t)
+            self._gp_b_cache.append((B_gp.copy(), valid.copy()))
+
+        mem_mb = 4 * self.n_elements * 6 * self.dof_per_elem * 8 / (1024**2)
+        print(f'  [FEA] Cached Tet10 Gauss-point B-matrices: {mem_mb:.0f} MB for {self.n_elements} elements')
+
     def _element_modulus(self, rho, penalty):
         """Vectorized SIMP density-stiffness scaling for all elements.
 
@@ -432,12 +461,17 @@ class FEASolver3D:
         t_asm = _time.perf_counter()
 
         # Cache fixed_dofs key for cholmod invalidation
-        fd_key = (fixed_dofs.tobytes() if hasattr(fixed_dofs, 'tobytes') else bytes(fixed_dofs))
-        if self._cached_free_dofs_key != fd_key:
-            self._cached_free_dofs = np.setdiff1d(np.arange(self.n_dofs), fixed_dofs)
-            self._cached_free_dofs_key = fd_key
-            self._cholmod_factor = None
-            self._cholmod_factor_shape = None
+        # §3.5: Once BCs are established (first solve), lock them — during
+        # topology optimization fixed_dofs never change, only K values do.
+        # This avoids re-dropping the CHOLMOD symbolic factorization.
+        if not self._bc_locked:
+            fd_key = (fixed_dofs.tobytes() if hasattr(fixed_dofs, 'tobytes') else bytes(fixed_dofs))
+            if self._cached_free_dofs_key != fd_key:
+                self._cached_free_dofs = np.setdiff1d(np.arange(self.n_dofs), fixed_dofs)
+                self._cached_free_dofs_key = fd_key
+                self._cholmod_factor = None
+                self._cholmod_factor_shape = None
+            self._bc_locked = True  # Lock after first successful setup
 
         mode = str(getattr(self, 'linear_solver_mode', 'auto')).lower()
         use_iterative = False
@@ -600,22 +634,32 @@ class FEASolver3D:
                                     + 6.0 * (txy**2 + tyz**2 + tzx**2)))
             vm_all[~valid] = 0.0
         else:
-            # Vectorized Tet10: batch all elements per Gauss point, keep max VM
-            elem_coords = self.nodes[self.elements]  # (n_elem, 10, 3)
+            # Vectorized Tet10: use precomputed Gauss-point B-matrices if available
             ue_all = uu[self.elem_dofs]  # (n_elem, 30)
-            # 4-point all-positive Gauss rule (degree 2)
-            a1, a2 = 0.1381966011250105, 0.5854101966249685
-            gps = [(a2, a1, a1), (a1, a2, a1), (a1, a1, a2), (a1, a1, a1)]
-            for r, s, t in gps:
-                B_gp, det_J, valid = self._batch_b_tet10(elem_coords, r, s, t)
-                strain = np.einsum('eij,ej->ei', B_gp, ue_all)  # (n_elem, 6)
-                stress = np.einsum('ij,ej->ei', self._d_base, strain) * scale_all[:, None]
-                sx, sy, sz = stress[:, 0], stress[:, 1], stress[:, 2]
-                txy, tyz, tzx = stress[:, 3], stress[:, 4], stress[:, 5]
-                vm_gp = np.sqrt(0.5 * ((sx - sy)**2 + (sy - sz)**2 + (sz - sx)**2
-                                       + 6.0 * (txy**2 + tyz**2 + tzx**2)))
-                vm_gp[~valid] = 0.0
-                vm_all = np.maximum(vm_all, vm_gp)
+            if self._gp_b_cache is not None:
+                for B_gp, valid in self._gp_b_cache:
+                    strain = np.einsum('eij,ej->ei', B_gp, ue_all)
+                    stress = np.einsum('ij,ej->ei', self._d_base, strain) * scale_all[:, None]
+                    sx, sy, sz = stress[:, 0], stress[:, 1], stress[:, 2]
+                    txy, tyz, tzx = stress[:, 3], stress[:, 4], stress[:, 5]
+                    vm_gp = np.sqrt(0.5 * ((sx - sy)**2 + (sy - sz)**2 + (sz - sx)**2
+                                           + 6.0 * (txy**2 + tyz**2 + tzx**2)))
+                    vm_gp[~valid] = 0.0
+                    vm_all = np.maximum(vm_all, vm_gp)
+            else:
+                elem_coords = self.nodes[self.elements]  # (n_elem, 10, 3)
+                a1, a2 = 0.1381966011250105, 0.5854101966249685
+                gps = [(a2, a1, a1), (a1, a2, a1), (a1, a1, a2), (a1, a1, a1)]
+                for r, s, t in gps:
+                    B_gp, det_J, valid = self._batch_b_tet10(elem_coords, r, s, t)
+                    strain = np.einsum('eij,ej->ei', B_gp, ue_all)
+                    stress = np.einsum('ij,ej->ei', self._d_base, strain) * scale_all[:, None]
+                    sx, sy, sz = stress[:, 0], stress[:, 1], stress[:, 2]
+                    txy, tyz, tzx = stress[:, 3], stress[:, 4], stress[:, 5]
+                    vm_gp = np.sqrt(0.5 * ((sx - sy)**2 + (sy - sz)**2 + (sz - sx)**2
+                                           + 6.0 * (txy**2 + tyz**2 + tzx**2)))
+                    vm_gp[~valid] = 0.0
+                    vm_all = np.maximum(vm_all, vm_gp)
 
         return vm_all
 
@@ -702,3 +746,60 @@ class FEASolver3D:
 
 
 print('3D FEA Solver module created (Tet4/Tet10, Gauss-pt stress, multi-load)')
+
+
+def distribute_surface_traction(nodes, face_nodes, total_force_vec):
+    """Distribute a total force as consistent nodal forces via area-weighted traction.
+
+    Instead of splitting force equally among selected nodes (which creates
+    stress singularities), this distributes force proportional to the
+    tributary area of each node on the loaded faces.
+
+    Parameters
+    ----------
+    nodes : ndarray (n_nodes, 3)
+        Node coordinates.
+    face_nodes : list of array-like
+        Each entry is a list/array of 3 node indices forming a triangular face.
+    total_force_vec : ndarray (3,)
+        Total force vector [Fx, Fy, Fz] to distribute.
+
+    Returns
+    -------
+    forces : ndarray (n_nodes*3,)
+        Global force vector with consistent nodal forces.
+    """
+    pts = np.asarray(nodes, dtype=np.float64)
+    f_total = np.asarray(total_force_vec, dtype=np.float64).ravel()[:3]
+    n_dofs = pts.shape[0] * 3
+    forces = np.zeros(n_dofs, dtype=np.float64)
+
+    # Compute tributary area per node
+    node_areas = np.zeros(pts.shape[0], dtype=np.float64)
+    total_area = 0.0
+    for face in face_nodes:
+        fn = np.asarray(face, dtype=np.int64)[:3]
+        v1 = pts[fn[1]] - pts[fn[0]]
+        v2 = pts[fn[2]] - pts[fn[0]]
+        area = 0.5 * float(np.linalg.norm(np.cross(v1, v2)))
+        total_area += area
+        # Each vertex of a triangle gets 1/3 of the face area
+        for ni in fn:
+            node_areas[ni] += area / 3.0
+
+    if total_area < 1e-30:
+        # Fallback: equal distribution
+        unique_nodes = np.unique(np.concatenate([np.asarray(f, dtype=np.int64)[:3] for f in face_nodes]))
+        if unique_nodes.size > 0:
+            f_per_node = f_total / unique_nodes.size
+            for ni in unique_nodes:
+                forces[3*ni:3*ni+3] = f_per_node
+        return forces
+
+    # Distribute force proportional to tributary area
+    loaded_nodes = np.where(node_areas > 1e-30)[0]
+    for ni in loaded_nodes:
+        frac = node_areas[ni] / total_area
+        forces[3*ni:3*ni+3] = f_total * frac
+
+    return forces
