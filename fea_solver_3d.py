@@ -63,6 +63,21 @@ class FEASolver3D:
         self._cached_free_dofs_key = None
         self._bc_locked = False  # Lock BC after first solve (BCs don't change during optimization)
 
+        # §4.1: Precomputed free-DOF CSC scatter map for O(nnz) submatrix extraction
+        self._free_dof_map_ready = False
+        self._free_src_indices = None    # Indices into full CSC data for free-free entries
+        self._free_csc_indices = None    # Row indices of the free-DOF CSC
+        self._free_csc_indptr = None     # Column pointers of the free-DOF CSC
+        self._free_n = 0                 # Number of free DOFs
+        self._free_dofs_arr = None       # Sorted array of free DOF indices
+
+        # §4.2: Cached AMG preconditioner (hierarchy reuse across iterations)
+        self._amg_M = None               # Cached preconditioner LinearOperator
+        self._amg_base_cg_iters = None   # CG iterations on first use (baseline)
+        self._amg_rebuild_counter = 0    # Iterations since last AMG rebuild
+        self._amg_rebuild_interval = 25  # Rebuild every N iterations as safety net
+        self._amg_nullspace = None       # Near-nullspace vectors for 3D elasticity
+
         # Precompute Gauss-point B-matrices for Tet10 (§3.4)
         self._gp_b_cache = None
         if self.npe == 10:
@@ -400,6 +415,111 @@ class FEASolver3D:
             shape=(self.n_dofs, self.n_dofs), copy=False
         )
 
+    # ------------------------------------------------------------------ #
+    # §4.1  Free-DOF CSC scatter map (precomputed, O(nnz) extraction)    #
+    # ------------------------------------------------------------------ #
+
+    def _build_free_dof_csc_map(self, fixed_dofs):
+        """Precompute a scatter map from full CSC data → free-DOF CSC data.
+
+        Called once when BCs are first established. Subsequent calls to
+        _extract_free_dof_matrix() become a single indexed-copy, avoiding
+        the expensive k.tocsr()[free][:, free].tocsr() path which does
+        3–4 sparse format conversions per iteration.
+        """
+        import time as _time
+        t0 = _time.perf_counter()
+
+        fixed = np.asarray(fixed_dofs, dtype=np.int64)
+        is_free = np.ones(self.n_dofs, dtype=bool)
+        if fixed.size > 0:
+            is_free[fixed] = False
+        free = np.where(is_free)[0].astype(np.int64)
+        n_free = free.size
+
+        # Global DOF → free-DOF index (-1 if fixed)
+        g2f = np.full(self.n_dofs, -1, dtype=np.int64)
+        g2f[free] = np.arange(n_free, dtype=np.int64)
+
+        # Expand CSC column indices for every nonzero entry (vectorized)
+        indptr = self._asm_csc_indptr
+        row_indices = self._asm_csc_indices.astype(np.int64)
+        nnz = row_indices.size
+        col_for_entry = np.repeat(np.arange(self.n_dofs, dtype=np.int64), np.diff(indptr))
+
+        # Keep entries where both row and col are free
+        mask = is_free[row_indices] & is_free[col_for_entry]
+        src_indices = np.where(mask)[0]
+
+        # Map to free-DOF row and column indices
+        free_rows = g2f[row_indices[src_indices]]
+        free_cols = g2f[col_for_entry[src_indices]]
+
+        # Build free-DOF CSC indptr (entries are already in column-major order)
+        col_counts = np.bincount(free_cols, minlength=n_free)
+        dst_indptr = np.zeros(n_free + 1, dtype=np.int64)
+        np.cumsum(col_counts, out=dst_indptr[1:])
+
+        self._free_src_indices = src_indices.astype(np.int64)
+        self._free_csc_indices = free_rows.astype(np.int32)
+        self._free_csc_indptr = dst_indptr
+        self._free_n = n_free
+        self._free_dofs_arr = free
+        self._free_dof_map_ready = True
+
+        t1 = _time.perf_counter()
+        kept = src_indices.size
+        print(f'  [SOLVER] Free-DOF scatter map built: {n_free} free DOFs, '
+              f'{kept}/{nnz} entries kept ({100.0*kept/max(nnz,1):.0f}%), '
+              f'{t1-t0:.2f}s')
+
+    def _extract_free_dof_matrix(self, k_csc):
+        """Extract free-DOF submatrix in O(nnz_free) using precomputed scatter map.
+
+        Returns a CSC matrix of shape (n_free, n_free).
+        """
+        free_data = k_csc.data[self._free_src_indices]
+        return csc_matrix(
+            (free_data, self._free_csc_indices, self._free_csc_indptr),
+            shape=(self._free_n, self._free_n), copy=False
+        )
+
+    # ------------------------------------------------------------------ #
+    # §4.3  Near-nullspace for 3D elasticity AMG                         #
+    # ------------------------------------------------------------------ #
+
+    def _build_elasticity_nullspace(self, free_dofs):
+        """Build 6-vector near-nullspace (rigid body modes) for AMG.
+
+        For 3D elasticity, the near-nullspace consists of 3 translations
+        and 3 infinitesimal rotations. Providing these to AMG enables
+        proper coarsening of the vector-valued displacement field,
+        dramatically reducing CG iteration count (often 3–5× fewer).
+        """
+        free = np.asarray(free_dofs, dtype=np.int64)
+        n_free = free.size
+        node_idx = free // 3
+        local_dof = free % 3  # 0=x, 1=y, 2=z
+
+        coords = self.nodes[node_idx]  # (n_free, 3)
+        x, y, z = coords[:, 0], coords[:, 1], coords[:, 2]
+
+        B = np.zeros((n_free, 6), dtype=np.float64)
+        # Translation modes
+        B[local_dof == 0, 0] = 1.0  # Tx
+        B[local_dof == 1, 1] = 1.0  # Ty
+        B[local_dof == 2, 2] = 1.0  # Tz
+        # Rotation about x-axis: (0, -z, y)
+        B[local_dof == 1, 3] = -z[local_dof == 1]
+        B[local_dof == 2, 3] =  y[local_dof == 2]
+        # Rotation about y-axis: (z, 0, -x)
+        B[local_dof == 0, 4] =  z[local_dof == 0]
+        B[local_dof == 2, 4] = -x[local_dof == 2]
+        # Rotation about z-axis: (-y, x, 0)
+        B[local_dof == 0, 5] = -y[local_dof == 0]
+        B[local_dof == 1, 5] =  x[local_dof == 1]
+        return B
+
     def _direct_solve(self, k_ff, f_f):
         """Direct solve using cholmod (preferred) or spsolve (fallback).
 
@@ -471,6 +591,13 @@ class FEASolver3D:
                 self._cached_free_dofs_key = fd_key
                 self._cholmod_factor = None
                 self._cholmod_factor_shape = None
+                # Build free-DOF scatter map and nullspace for iterative path
+                self._build_free_dof_csc_map(fixed_dofs)
+                self._amg_nullspace = self._build_elasticity_nullspace(self._free_dofs_arr)
+                # Invalidate cached AMG
+                self._amg_M = None
+                self._amg_base_cg_iters = None
+                self._amg_rebuild_counter = 0
             self._bc_locked = True  # Lock after first successful setup
 
         mode = str(getattr(self, 'linear_solver_mode', 'auto')).lower()
@@ -482,20 +609,44 @@ class FEASolver3D:
             use_iterative = (n_free >= int(getattr(self, 'iterative_solver_dof_threshold', 50000)))
 
         if use_iterative:
-            # Use free-DOF submatrix for CG (well-conditioned, κ ≈ 10³-10⁴).
-            # Penalty BCs create κ ≈ 10⁸ which prevents CG convergence.
-            free = self._cached_free_dofs
-            k_ff = k.tocsr()[free][:, free].tocsr()
+            # §4.1: Extract free-DOF submatrix using precomputed scatter map.
+            # O(nnz_free) indexed copy instead of k.tocsr()[free][:, free] which
+            # does 3–4 sparse format conversions.
+            free = self._free_dofs_arr if self._free_dof_map_ready else self._cached_free_dofs
+            if self._free_dof_map_ready:
+                k_ff = self._extract_free_dof_matrix(k)
+            else:
+                k_ff = k.tocsr()[free][:, free].tocsr()
             f_f = np.asarray(forces, dtype=np.float64)[free]
             t_bc = _time.perf_counter()
 
+            # §4.2: AMG preconditioner with hierarchy caching.
+            # AMG setup (coarsening + interpolation) is expensive (~30-50% of solve).
+            # Since sparsity pattern is constant during optimization, the hierarchy
+            # is reused across iterations. Rebuild only when CG convergence degrades
+            # or after a fixed interval.
             M = None
+            need_amg_rebuild = False
             if bool(getattr(self, 'use_pyamg_preconditioner', True)) and _HAS_PYAMG:
-                try:
-                    ml = pyamg.smoothed_aggregation_solver(k_ff)
-                    M = ml.aspreconditioner()
-                except Exception:
-                    M = None
+                self._amg_rebuild_counter += 1
+                if self._amg_M is None:
+                    need_amg_rebuild = True
+                elif self._amg_rebuild_counter >= self._amg_rebuild_interval:
+                    need_amg_rebuild = True
+
+                if need_amg_rebuild:
+                    try:
+                        k_ff_csr = k_ff.tocsr() if k_ff.format != 'csr' else k_ff
+                        # §4.3: Near-nullspace (rigid body modes) gives AMG proper
+                        # vector-valued coarsening for 3D elasticity — typically
+                        # reduces CG iterations by 3–5×.
+                        B_ns = self._amg_nullspace
+                        ml = pyamg.smoothed_aggregation_solver(k_ff_csr, B=B_ns)
+                        self._amg_M = ml.aspreconditioner()
+                        self._amg_rebuild_counter = 0
+                    except Exception:
+                        self._amg_M = None
+                M = self._amg_M
 
             x0 = None
             if self._last_u is not None:
@@ -505,10 +656,27 @@ class FEASolver3D:
 
             tol = float(getattr(self, 'iterative_solver_tol', 1e-8))
             maxiter = int(getattr(self, 'iterative_solver_maxiter', 2000))
+
+            # Track CG iteration count to detect preconditioner staleness
+            cg_iters = [0]
+            def _cg_counter(x):
+                cg_iters[0] += 1
+
             try:
-                u_f, info = cg(k_ff, f_f, x0=x0, tol=tol, maxiter=maxiter, M=M)
+                u_f, info = cg(k_ff, f_f, x0=x0, tol=tol, maxiter=maxiter, M=M,
+                               callback=_cg_counter)
             except TypeError:
-                u_f, info = cg(k_ff, f_f, x0=x0, rtol=tol, atol=0.0, maxiter=maxiter, M=M)
+                u_f, info = cg(k_ff, f_f, x0=x0, rtol=tol, atol=0.0, maxiter=maxiter,
+                               M=M, callback=_cg_counter)
+
+            # §4.2b: Adaptive AMG rebuild — if CG iterations grow > 3× baseline,
+            # the stale preconditioner is hurting. Rebuild on next iteration.
+            if info == 0 and cg_iters[0] > 0:
+                if self._amg_base_cg_iters is None:
+                    self._amg_base_cg_iters = cg_iters[0]
+                elif cg_iters[0] > 3 * max(self._amg_base_cg_iters, 10):
+                    self._amg_M = None  # Force rebuild on next iteration
+                    self._amg_base_cg_iters = None
 
             if info == 0 and np.all(np.isfinite(u_f)):
                 u = np.zeros(self.n_dofs, dtype=np.float64)
@@ -516,11 +684,14 @@ class FEASolver3D:
                 if not self._solver_notice_printed:
                     msg = 'CG+AMG' if (M is not None) else 'CG'
                     ws = ' (warm-started)' if x0 is not None else ''
-                    print(f'  [SOLVER] Using iterative {msg} with free-DOF extraction{ws}.')
+                    scatter_msg = ' (scatter-map)' if self._free_dof_map_ready else ''
+                    print(f'  [SOLVER] Using iterative {msg}{scatter_msg}{ws}, '
+                          f'{cg_iters[0]} CG iters.')
                     self._solver_notice_printed = True
             else:
                 if not self._solver_notice_printed:
-                    print('  [SOLVER] Iterative solve did not converge, falling back to direct.')
+                    print(f'  [SOLVER] Iterative solve did not converge '
+                          f'({cg_iters[0]} iters), falling back to direct.')
                     self._solver_notice_printed = True
                 # Direct fallback: use penalty method (fast for CHOLMOD/spsolve)
                 k_bc, f_bc = self._apply_bc_penalty(k.tocsc(), forces, fixed_dofs)
