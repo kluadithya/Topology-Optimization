@@ -604,7 +604,19 @@ class SIMP3DOptimizer:
         # Binary-threshold result
         u_bin = self.fea.solve(rho_binary, forces, fixed_dofs, self.penalty)
         comp_bin = self.fea.calculate_compliance(u_bin, rho_binary, self.penalty)
-        max_disp_bin = float(np.max(np.abs(u_bin)))
+
+        # Report max displacement from solid nodes only — void elements have
+        # near-zero stiffness and can accumulate fictitious large displacements
+        # in disconnected regions, inflating np.max(np.abs(u)).
+        solid_elem_mask = (rho_binary >= threshold)
+        solid_node_indices = np.unique(self.fea.elements[solid_elem_mask].flatten())
+        solid_dofs = np.concatenate([
+            3 * solid_node_indices,
+            3 * solid_node_indices + 1,
+            3 * solid_node_indices + 2,
+        ])
+        max_disp_bin = float(np.max(np.abs(u_bin[solid_dofs])))
+
         vm_bin = self.fea.calculate_stress_all_gauss(u_bin, rho_binary, self.penalty)
         max_vm_bin = float(np.max(vm_bin)) if vm_bin.size else 0.0
 

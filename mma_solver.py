@@ -289,20 +289,18 @@ def pnorm_stress(vm_stresses, sigma_allow, pn=8.0):
     ratio_safe = np.maximum(ratio, 1e-30)
 
     # P-norm with log-sum-exp style stabilization for large p
+    # The division by n inside the log already embeds the Le et al. (2010)
+    # N^(-1/p) correction: for uniform σ_i = σ, this yields PN = σ exactly.
+    # No additional correction factor is needed.
     log_terms = p * np.log(ratio_safe)
     log_max = float(np.max(log_terms))
     log_sum = log_max + np.log(float(np.sum(np.exp(log_terms - log_max))) / max(n, 1))
-    pn_raw = sa * np.exp(log_sum / p)
+    pn_value = sa * np.exp(log_sum / p)
 
-    # Le et al. (2010) correction: remove N^(1/p) bias so p-norm ≈ max(vm)
-    # Without correction, PN = max(vm) * N^(1/p) for uniform stress — over-conservative.
-    correction = float(max(n, 1)) ** (-1.0 / p)
-    pn_value = pn_raw * correction
-
-    # Derivative: d(PN_corrected)/d(vm_i) = correction * d(PN_raw)/d(vm_i)
-    pn_norm = pn_raw / sa
+    # Derivative: d(PN)/d(vm_i)
+    pn_norm = pn_value / sa
     if pn_norm > 1e-30:
-        dpn_dvm = correction * pn_norm ** (1.0 - p) * ratio_safe ** (p - 1.0) / max(n, 1)
+        dpn_dvm = pn_norm ** (1.0 - p) * ratio_safe ** (p - 1.0) / max(n, 1)
     else:
         dpn_dvm = np.zeros_like(vm)
 
