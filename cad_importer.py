@@ -490,6 +490,16 @@ class Mesh3DGenerator:
             self.tet_vertices = verts
             self.tet_elements = tet_elements
 
+            # §FIX: Gmsh Tet10 node ordering correction.
+            # Gmsh assigns midside nodes as:  4=(0,1) 5=(1,2) 6=(0,2) 7=(0,3) 8=(2,3) 9=(1,3)
+            # Our shape functions expect:      4=(0,1) 5=(1,2) 6=(0,2) 7=(0,3) 8=(1,3) 9=(2,3)
+            # i.e. N8 = 4*L2*L4 (edge 1-3) and N9 = 4*L3*L4 (edge 2-3).
+            # Without this swap, every Tet10 element gets corrupted shape derivatives,
+            # causing displacement errors that grow with mesh refinement.
+            if order == 2 and self.tet_elements.shape[1] == 10:
+                self.tet_elements[:, [8, 9]] = self.tet_elements[:, [9, 8]]
+                logger.info('  Applied gmsh->FEA Tet10 node reorder (swap nodes 8,9)')
+
             logger.info(f'  Tetrahedral mesh: {len(self.tet_vertices):,} nodes, '
                         f'{len(self.tet_elements):,} elements')
             return True

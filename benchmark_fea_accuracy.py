@@ -84,6 +84,12 @@ def _make_cantilever_beam_mesh(L, W, H, target_elems, element_order=2):
             elements[i, j] = tag_to_idx[int(tet_conn[i, j])]
 
     gmsh.finalize()
+
+    # Gmsh Tet10 node ordering fix: swap midside nodes 8 and 9
+    # Gmsh: 8=(2,3), 9=(1,3)  vs  Our shape funcs: 8=(1,3), 9=(2,3)
+    if element_order == 2 and elements.shape[1] == 10:
+        elements[:, [8, 9]] = elements[:, [9, 8]]
+
     return verts, elements
 
 
