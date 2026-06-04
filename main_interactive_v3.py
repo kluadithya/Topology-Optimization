@@ -1,5 +1,5 @@
 """
-TOPOLOGY OPTIMIZATION FRAMEWORK - INTERACTIVE VERSION v3
+TOPOLOGY OPTIMIZATION FRAMEWORK
 3D-only interactive workflow with unified single-window GUI support
 """
 
@@ -47,7 +47,7 @@ class InteractiveTopologyOptimizer:
         """Display the main banner"""
         print('''
         
-          TOPOLOGY OPTIMIZATION FRAMEWORK - INTERACTIVE v3
+          TOPOLOGY OPTIMIZATION FRAMEWORK
           
         Enhanced Interactive Experience for 3D Optimization
         

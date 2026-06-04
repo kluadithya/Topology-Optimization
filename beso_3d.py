@@ -1,4 +1,5 @@
 import numpy as np
+from collections import deque
 from scipy.spatial import cKDTree
 from fea_solver_3d import FEASolver3D
 from density_filter_3d import MinimumMemberSizeProjection3D, auto_filter_radius_from_mesh
@@ -94,6 +95,7 @@ class BESO3DOptimizer:
 
         self.centroids = np.mean(self.fea.nodes[self.fea.elements], axis=1)
         self._build_filter_map()
+        self._build_element_adjacency()
 
         elems = np.asarray(self.fea.elements, dtype=np.int64)
         npe = int(elems.shape[1])
@@ -140,6 +142,125 @@ class BESO3DOptimizer:
         stage_len = int(np.ceil(float(self.max_iterations) / float(max(len(levels), 1))))
         stage_idx = int(np.clip(iteration // max(stage_len, 1), 0, len(levels) - 1))
         return float(levels[stage_idx])
+
+    def _build_element_adjacency(self):
+        """Build element-element adjacency via shared nodes for connectivity checks."""
+        elems = np.asarray(self.fea.elements, dtype=np.int64)
+        n_nodes = int(self.fea.nodes.shape[0])
+        node_to_elems = [[] for _ in range(n_nodes)]
+        for eidx in range(self.n_elements):
+            for nid in elems[eidx]:
+                ni = int(nid)
+                if 0 <= ni < n_nodes:
+                    node_to_elems[ni].append(eidx)
+        self._elem_adj = []
+        for eidx in range(self.n_elements):
+            nset = set()
+            for nid in elems[eidx]:
+                nset.update(node_to_elems[int(nid)])
+            nset.discard(eidx)
+            self._elem_adj.append(np.asarray(sorted(nset), dtype=np.int64))
+
+    def _enforce_connectivity(self, rho, fixed_dofs, forces):
+        """Ensure load paths remain connected between supports and loads.
+
+        After binary thresholding, checks if all loaded elements can reach
+        support elements through solid elements. If disconnected, restores
+        bridging elements and their immediate neighbors to form a viable
+        load path (preventing 1-element-wide bottlenecks).
+        """
+        elems = self.fea.elements
+
+        # Identify support and load nodes
+        fd = np.asarray(fixed_dofs, dtype=np.int64)
+        support_nodes = np.unique(fd // 3)
+        f3 = np.asarray(forces, dtype=np.float64).reshape(-1, 3)
+        load_nodes = np.where(np.max(np.abs(f3), axis=1) > 1e-30)[0]
+
+        if support_nodes.size == 0 or load_nodes.size == 0:
+            return rho
+
+        # Map nodes to elements
+        support_mask = np.any(np.isin(elems, support_nodes), axis=1)
+        load_mask = np.any(np.isin(elems, load_nodes), axis=1)
+
+        # Keep support and load elements solid
+        rho[support_mask] = 1.0
+        rho[load_mask] = 1.0
+
+        support_set = set(np.where(support_mask)[0].tolist())
+        load_set = set(np.where(load_mask)[0].tolist())
+
+        total_restored = 0
+        max_bridge_passes = 5  # Handle multiple disconnected components
+
+        for _pass in range(max_bridge_passes):
+            is_solid = rho > 0.5
+
+            # BFS from support elements through solid elements
+            reachable = np.zeros(self.n_elements, dtype=bool)
+            queue = deque()
+            for e in support_set:
+                if is_solid[e]:
+                    reachable[e] = True
+                    queue.append(e)
+            while queue:
+                e = queue.popleft()
+                for nb in self._elem_adj[e]:
+                    if not reachable[nb] and is_solid[nb]:
+                        reachable[nb] = True
+                        queue.append(nb)
+
+            # Check if all load elements are reachable
+            unreachable = load_set - set(np.where(reachable)[0].tolist())
+            if not unreachable:
+                break
+
+            # Bridge: BFS from reachable set through ALL elements
+            parent = np.full(self.n_elements, -1, dtype=np.int64)
+            for e in range(self.n_elements):
+                if reachable[e]:
+                    parent[e] = e
+            bq = deque(e for e in range(self.n_elements) if reachable[e])
+            found = -1
+            while bq and found < 0:
+                e = bq.popleft()
+                for nb in self._elem_adj[e]:
+                    if parent[nb] < 0:
+                        parent[nb] = e
+                        if nb in unreachable:
+                            found = nb
+                            break
+                        bq.append(nb)
+
+            if found < 0:
+                break
+
+            # Trace back path and restore bridging elements + neighbors
+            bridge_path = []
+            e = found
+            while e >= 0 and not reachable[e]:
+                bridge_path.append(e)
+                reachable[e] = True
+                e = int(parent[e])
+
+            # Restore bridge path elements
+            for be in bridge_path:
+                if rho[be] < 0.5:
+                    rho[be] = 1.0
+                    total_restored += 1
+
+            # Thicken bridge: also restore immediate neighbors of bridge
+            for be in bridge_path:
+                for nb in self._elem_adj[be]:
+                    if rho[nb] < 0.5:
+                        rho[nb] = 1.0
+                        total_restored += 1
+
+        if total_restored > 0:
+            print(f'    [CONNECTIVITY] Restored {total_restored} bridging elements')
+
+        return rho
 
     def _enforce_passive_solid(self, rho):
         if np.any(self.passive_solid):
@@ -229,6 +350,7 @@ class BESO3DOptimizer:
             sens_hist = sens_avg
 
             rho_new = self._threshold_by_volume(sens_avg, vol, rho_prev=rho)
+            rho_new = self._enforce_connectivity(rho_new, fixed_dofs, forces)
             if self.member_projector is not None:
                 self.member_projector.set_beta(self._projection_beta(it))
                 rho_new = self.member_projector.apply(rho_new, target_volume=vol, rho_min=self.rho_min)

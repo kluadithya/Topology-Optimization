@@ -1,4 +1,4 @@
-﻿"""
+"""
 3D Level Set Method (LSM) optimizer with Hamilton-Jacobi PDE evolution.
 
 Implements a proper geometric level-set method:
@@ -12,6 +12,7 @@ Implements a proper geometric level-set method:
 
 import heapq
 import numpy as np
+from collections import deque
 from scipy.spatial import cKDTree
 from fea_solver_3d import FEASolver3D
 from density_filter_3d import DensityFilter3D, MinimumMemberSizeProjection3D, auto_filter_radius_from_mesh
@@ -189,6 +190,84 @@ class LSM3DOptimizer:
         if np.any(self.passive_solid):
             rho[self.passive_solid] = 1.0
         return rho
+
+    def _enforce_load_path_connectivity(self, fixed_dofs, forces):
+        """Ensure phi maintains connected load paths between supports and loads.
+
+        After H-J evolution, checks if the implied solid region connects all
+        loaded elements to support elements.  If disconnected, sets phi of
+        bridging elements to positive (solid) to restore the load path.
+        """
+        elems = self.fea.elements
+
+        fd = np.asarray(fixed_dofs, dtype=np.int64)
+        support_nodes = np.unique(fd // 3)
+        f3 = np.asarray(forces, dtype=np.float64).reshape(-1, 3)
+        load_nodes = np.where(np.max(np.abs(f3), axis=1) > 1e-30)[0]
+
+        if support_nodes.size == 0 or load_nodes.size == 0:
+            return
+
+        support_mask = np.any(np.isin(elems, support_nodes), axis=1)
+        load_mask = np.any(np.isin(elems, load_nodes), axis=1)
+
+        # Ensure support/load elements stay solid
+        eps = max(self.epsilon * self.filter_radius, 1e-12)
+        self.phi[support_mask] = np.maximum(self.phi[support_mask], eps * 2.0)
+        self.phi[load_mask] = np.maximum(self.phi[load_mask], eps * 2.0)
+
+        rho = self._heaviside_density()
+        is_solid = rho >= 0.5
+
+        support_set = set(np.where(support_mask)[0].tolist())
+        load_set = set(np.where(load_mask)[0].tolist())
+
+        # BFS from support elements through solid elements
+        reachable = np.zeros(self.n_elements, dtype=bool)
+        queue = deque()
+        for e in support_set:
+            reachable[e] = True
+            queue.append(e)
+        while queue:
+            e = queue.popleft()
+            for nb in self.elem_neighbors[e]:
+                if not reachable[nb] and is_solid[nb]:
+                    reachable[nb] = True
+                    queue.append(nb)
+
+        unreachable = load_set - set(np.where(reachable)[0].tolist())
+        if not unreachable:
+            return
+
+        # Bridge: BFS from reachable set through ALL elements
+        parent = np.full(self.n_elements, -1, dtype=np.int64)
+        for e in range(self.n_elements):
+            if reachable[e]:
+                parent[e] = e
+        bq = deque(e for e in range(self.n_elements) if reachable[e])
+        found = -1
+        while bq and found < 0:
+            e = bq.popleft()
+            for nb in self.elem_neighbors[e]:
+                if parent[nb] < 0:
+                    parent[nb] = e
+                    if nb in unreachable:
+                        found = nb
+                        break
+                    bq.append(nb)
+
+        if found >= 0:
+            restored = 0
+            e = found
+            while e >= 0 and not reachable[e]:
+                if self.phi[e] < eps:
+                    self.phi[e] = eps * 2.0
+                    restored += 1
+                reachable[e] = True
+                e = int(parent[e])
+            if restored > 0:
+                print(f'    [CONNECTIVITY] Restored {restored} bridging elements')
+            self._enforce_passive_on_phi()
 
     # â”€â”€ Regularized Heaviside: maps phi â†’ density â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
@@ -575,26 +654,8 @@ class LSM3DOptimizer:
             self._upwind_hj_update(velocity)
             self._smooth_phi()
 
-            # Connectivity guard: prevent isolated void nucleation.
-            try:
-                if prev_rho is not None:
-                    prev_solid = (prev_rho >= 0.5)
-                    prev_void = ~prev_solid
-                    rho_after = self._heaviside_density()
-                    new_void = (~(rho_after >= 0.5)) & prev_solid
-                    if new_void.any():
-                        allow = np.zeros_like(new_void, dtype=bool)
-                        for idx in np.where(new_void)[0].tolist():
-                            nbrs = self.elem_neighbors[int(idx)]
-                            if nbrs.size and np.any(prev_void[nbrs]):
-                                allow[idx] = True
-                        revert_idx = np.where(new_void & (~allow) & (~self.passive_solid))[0]
-                        if revert_idx.size > 0:
-                            eps = max(self.epsilon * self.filter_radius, 1e-12)
-                            self.phi[revert_idx] = eps * 1.1
-                            self._enforce_passive_on_phi()
-            except Exception:
-                pass
+            # Connectivity guard: ensure load paths remain connected.
+            self._enforce_load_path_connectivity(fixed_dofs, forces)
 
             # 6. Periodic reinitialization to signed distance
             if self.reinit_interval > 0 and ((it + 1) % self.reinit_interval == 0):
