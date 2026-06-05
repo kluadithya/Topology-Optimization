@@ -196,7 +196,8 @@ class LSM3DOptimizer:
 
         After H-J evolution, checks if the implied solid region connects all
         loaded elements to support elements.  If disconnected, sets phi of
-        bridging elements to positive (solid) to restore the load path.
+        bridging elements and their neighbors to positive (solid) to restore
+        a structurally viable load path.
         """
         elems = self.fea.elements
 
@@ -216,58 +217,77 @@ class LSM3DOptimizer:
         self.phi[support_mask] = np.maximum(self.phi[support_mask], eps * 2.0)
         self.phi[load_mask] = np.maximum(self.phi[load_mask], eps * 2.0)
 
-        rho = self._heaviside_density()
-        is_solid = rho >= 0.5
-
         support_set = set(np.where(support_mask)[0].tolist())
         load_set = set(np.where(load_mask)[0].tolist())
 
-        # BFS from support elements through solid elements
-        reachable = np.zeros(self.n_elements, dtype=bool)
-        queue = deque()
-        for e in support_set:
-            reachable[e] = True
-            queue.append(e)
-        while queue:
-            e = queue.popleft()
-            for nb in self.elem_neighbors[e]:
-                if not reachable[nb] and is_solid[nb]:
-                    reachable[nb] = True
-                    queue.append(nb)
+        total_restored = 0
+        max_bridge_passes = 5
 
-        unreachable = load_set - set(np.where(reachable)[0].tolist())
-        if not unreachable:
-            return
+        for _pass in range(max_bridge_passes):
+            rho = self._heaviside_density()
+            is_solid = rho >= 0.5
 
-        # Bridge: BFS from reachable set through ALL elements
-        parent = np.full(self.n_elements, -1, dtype=np.int64)
-        for e in range(self.n_elements):
-            if reachable[e]:
-                parent[e] = e
-        bq = deque(e for e in range(self.n_elements) if reachable[e])
-        found = -1
-        while bq and found < 0:
-            e = bq.popleft()
-            for nb in self.elem_neighbors[e]:
-                if parent[nb] < 0:
-                    parent[nb] = e
-                    if nb in unreachable:
-                        found = nb
-                        break
-                    bq.append(nb)
+            # BFS from support elements through solid elements
+            reachable = np.zeros(self.n_elements, dtype=bool)
+            queue = deque()
+            for e in support_set:
+                if is_solid[e]:
+                    reachable[e] = True
+                    queue.append(e)
+            while queue:
+                e = queue.popleft()
+                for nb in self.elem_neighbors[e]:
+                    if not reachable[nb] and is_solid[nb]:
+                        reachable[nb] = True
+                        queue.append(nb)
 
-        if found >= 0:
-            restored = 0
+            unreachable = load_set - set(np.where(reachable)[0].tolist())
+            if not unreachable:
+                break
+
+            # Bridge: BFS from reachable set through ALL elements
+            parent = np.full(self.n_elements, -1, dtype=np.int64)
+            for e in range(self.n_elements):
+                if reachable[e]:
+                    parent[e] = e
+            bq = deque(e for e in range(self.n_elements) if reachable[e])
+            found = -1
+            while bq and found < 0:
+                e = bq.popleft()
+                for nb in self.elem_neighbors[e]:
+                    if parent[nb] < 0:
+                        parent[nb] = e
+                        if nb in unreachable:
+                            found = nb
+                            break
+                        bq.append(nb)
+
+            if found < 0:
+                break
+
+            # Trace back path and restore bridging elements + neighbors
+            bridge_path = []
             e = found
             while e >= 0 and not reachable[e]:
-                if self.phi[e] < eps:
-                    self.phi[e] = eps * 2.0
-                    restored += 1
+                bridge_path.append(e)
                 reachable[e] = True
                 e = int(parent[e])
-            if restored > 0:
-                print(f'    [CONNECTIVITY] Restored {restored} bridging elements')
-            self._enforce_passive_on_phi()
+
+            for be in bridge_path:
+                if self.phi[be] < eps:
+                    self.phi[be] = eps * 2.0
+                    total_restored += 1
+
+            # Thicken bridge: also restore immediate neighbors
+            for be in bridge_path:
+                for nb in self.elem_neighbors[be]:
+                    if self.phi[nb] < eps:
+                        self.phi[nb] = eps * 2.0
+                        total_restored += 1
+
+        if total_restored > 0:
+            print(f'    [CONNECTIVITY] Restored {total_restored} bridging elements')
+        self._enforce_passive_on_phi()
 
     # â”€â”€ Regularized Heaviside: maps phi â†’ density â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 

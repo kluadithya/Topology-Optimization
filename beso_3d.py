@@ -279,8 +279,9 @@ class BESO3DOptimizer:
         ue = u[self.elem_dofs]
         ce0 = np.einsum('ni,nij,nj->n', ue, self.ke0, ue)
         scale = max(1.0 - float(getattr(self.material, 'rho_min', 0.0)), 1e-12)
-        # Classic BESO sensitivity uses elemental strain energy ranking without SIMP penalty interpolation.
-        dc = -scale * ce0
+        # Soft-kill BESO sensitivity includes SIMP penalty interpolation.
+        rho_eff = np.maximum(rho, getattr(self.material, 'rho_min', 1e-6))
+        dc = -scale * self.fea_penalty * (rho_eff ** (self.fea_penalty - 1.0)) * ce0
         dc = self._apply_sensitivity_filter(dc, rho)
         if np.any(self.passive_solid):
             dc[self.passive_solid] = np.max(dc) + 1.0

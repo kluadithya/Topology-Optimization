@@ -320,11 +320,16 @@ class MoriTanaka3DOptimizer:
             self._enforce_passive_solid(rho_phys)
 
             e_eff_elem = self._effective_modulus_mori_tanaka(rho_phys)
-            rho_mech = self._equivalent_simp_density_from_modulus(e_eff_elem)
-            self._enforce_passive_solid(rho_mech)
+            
+            # Pass effective modulus scaling directly to FEA solver
+            scale = e_eff_elem / float(max(self.material.E0, 1e-12))
+            
+            # If there are passive solid elements, ensure their scale is 1.0
+            if np.any(self.passive_solid):
+                scale[self.passive_solid] = 1.0
 
-            u = self.fea.solve(rho_mech, forces, fixed_dofs, self.penalty)
-            compliance = float(self.fea.calculate_compliance(u, rho_mech, self.penalty))
+            u = self.fea.solve_with_modulus(scale, forces, fixed_dofs)
+            compliance = float(self.fea.calculate_compliance_with_modulus(u, scale))
             compliance_history.append(compliance)
 
             tensor = self._compute_homogenized_tensor(rho_phys)

@@ -406,14 +406,19 @@ class FEASolver3D:
         self._asm_csc_indices = u_rows
         self._asm_nnz = nnz
 
-    def assemble_global_stiffness(self, rho, penalty=3.0):
-        scale = self._element_modulus(rho, penalty)
+    def assemble_global_stiffness_from_scale(self, scale):
+        """Assemble global stiffness matrix directly from element scale factors."""
+        scale = np.asarray(scale, dtype=np.float64).reshape(-1)
         coo_data = (self._ke_unit.reshape(self.n_elements, -1) * scale[:, None]).reshape(-1)
         csc_data = np.bincount(self._asm_scatter, weights=coo_data, minlength=self._asm_nnz)
         return csc_matrix(
             (csc_data, self._asm_csc_indices, self._asm_csc_indptr),
             shape=(self.n_dofs, self.n_dofs), copy=False
         )
+
+    def assemble_global_stiffness(self, rho, penalty=3.0):
+        scale = self._element_modulus(rho, penalty)
+        return self.assemble_global_stiffness_from_scale(scale)
 
     # ------------------------------------------------------------------ #
     # §4.1  Free-DOF CSC scatter map (precomputed, O(nnz) extraction)    #
@@ -712,12 +717,57 @@ class FEASolver3D:
         self._last_u = u.copy()
         return u
 
+    def solve_with_modulus(self, scale, forces, fixed_dofs):
+        """Solve FEA system using direct element stiffness scales instead of SIMP."""
+        import time as _time
+        t_start = _time.perf_counter()
+
+        k = self.assemble_global_stiffness_from_scale(scale)
+        t_asm = _time.perf_counter()
+
+        if not self._bc_locked:
+            fd_key = (fixed_dofs.tobytes() if hasattr(fixed_dofs, 'tobytes') else bytes(fixed_dofs))
+            if self._cached_free_dofs_key != fd_key:
+                self._cached_free_dofs = np.setdiff1d(np.arange(self.n_dofs), fixed_dofs)
+                self._cached_free_dofs_key = fd_key
+                self._cholmod_factor = None
+                self._cholmod_factor_shape = None
+                self._build_free_dof_csc_map(fixed_dofs)
+                self._amg_nullspace = self._build_elasticity_nullspace(self._free_dofs_arr)
+                self._amg_M = None
+                self._amg_base_cg_iters = None
+                self._amg_rebuild_counter = 0
+
+        self._bc_locked = True
+        k_ff = self._extract_free_dof_matrix(k)
+        t_bc = _time.perf_counter()
+
+        f_f = np.asarray(forces, dtype=np.float64)[self._free_dofs_arr]
+        u_f = self._direct_solve(k_ff, f_f)
+        t_solve = _time.perf_counter()
+
+        u = np.zeros(self.n_dofs, dtype=np.float64)
+        u[self._free_dofs_arr] = u_f
+
+        if not self._solver_notice_printed:
+            print(f'  [SOLVER] Timing: assembly={t_asm-t_start:.2f}s, BC+precond={t_bc-t_asm:.2f}s, solve={t_solve-t_bc:.2f}s, total={t_solve-t_start:.2f}s')
+            self._solver_notice_printed = True
+
+        return u
+
     def calculate_compliance(self, u, rho, penalty=3.0):
         scale = self._element_modulus(rho, penalty)
         uu = np.asarray(u, dtype=np.float64)
         ue = uu[self.elem_dofs]
         ce_unit = np.einsum('ni,nij,nj->n', ue, self._ke_unit, ue)
         return float(np.sum(scale * ce_unit))
+
+    def calculate_compliance_with_modulus(self, u, scale):
+        """Calculate compliance using direct element stiffness scales."""
+        uu = np.asarray(u, dtype=np.float64)
+        ue = uu[self.elem_dofs]
+        ce_unit = np.einsum('ni,nij,nj->n', ue, self._ke_unit, ue)
+        return float(np.sum(np.asarray(scale, dtype=np.float64).reshape(-1) * ce_unit))
 
     def calculate_stress(self, u, elem_idx, rho, penalty=3.0):
         e = int(elem_idx)
