@@ -193,14 +193,14 @@ class InteractiveTopologyOptimizer:
             if 1 <= idx <= len(keys):
                 selected = MATERIAL_LIBRARY[keys[idx - 1]]
                 self.config['material_name'] = selected.get('display_name', keys[idx - 1])
-                self.config['young_modulus'] = float(selected['young_modulus_pa'])
+                self.config['young_modulus'] = float(selected['young_modulus_mpa'])
                 self.config['poisson_ratio'] = float(selected['poisson_ratio'])
-                self.config['material_density'] = float(selected['density_kg_m3'])
-                self.config['yield_strength'] = float(selected['yield_strength_pa'])
+                self.config['material_density'] = float(selected['density_kg_mm3'])
+                self.config['yield_strength'] = float(selected['yield_strength_mpa'])
                 for src_key, cfg_key in (
                     ('thermal_expansion_1_K', 'thermal_expansion'),
-                    ('fatigue_limit_pa', 'fatigue_limit'),
-                    ('fracture_toughness_mpa_sqrt_m', 'fracture_toughness'),
+                    ('fatigue_limit_mpa', 'fatigue_limit'),
+                    ('fracture_toughness_mpa_sqrt_mm', 'fracture_toughness'),
                 ):
                     if src_key in selected and selected[src_key] is not None:
                         self.config[cfg_key] = float(selected[src_key])
@@ -210,13 +210,13 @@ class InteractiveTopologyOptimizer:
 
         if selected is None:
             self.config['material_name'] = 'Custom'
-            self.config['young_modulus'] = self.safe_input("Young's Modulus / Elastic Stiffness [Pa]: ", float)
+            self.config['young_modulus'] = self.safe_input("Young's Modulus / Elastic Stiffness [MPa]: ", float)
             self.config['poisson_ratio'] = self.safe_input("Poisson's Ratio [-]: ", float)
-            self.config['material_density'] = self.safe_input('Mass Density [kg/m^3]: ', float)
-            self.config['yield_strength'] = self.safe_input('Yield Strength [Pa]: ', float)
+            self.config['material_density'] = self.safe_input('Mass Density [kg/mm^3]: ', float)
+            self.config['yield_strength'] = self.safe_input('Yield Strength [MPa]: ', float)
             te = self.safe_input('Thermal expansion coeff [1/K] (optional): ', float, allow_none=True)
-            fl = self.safe_input('Fatigue limit [Pa] (optional): ', float, allow_none=True)
-            fk = self.safe_input('Fracture toughness [MPa*sqrt(m)] (optional): ', float, allow_none=True)
+            fl = self.safe_input('Fatigue limit [MPa] (optional): ', float, allow_none=True)
+            fk = self.safe_input('Fracture toughness [MPa*sqrt(mm)] (optional): ', float, allow_none=True)
             if te is not None:
                 self.config['thermal_expansion'] = float(te)
             if fl is not None:
@@ -272,7 +272,7 @@ class InteractiveTopologyOptimizer:
                 e_eff = float(am_result.get('effective_young_modulus', 0.0))
                 if not np.isfinite(e_eff) or e_eff <= 0.0:
                     print("[ERROR] Effective Young's modulus is non-physical after AM scaling.")
-                elif e_eff < 1e6 or e_eff > 1e12:
+                elif e_eff < 1.0 or e_eff > 1e6:
                     print("[WARNING] Effective Young's modulus is outside a typical range. Check AM scaling.")
 
                 print(f"[OK] AM process: {am_result['process_name']} (build axis {am_result['build_axis']})")
@@ -281,16 +281,16 @@ class InteractiveTopologyOptimizer:
 
         print('\nActive material properties for TO:')
         print(f"  Material: {self.config.get('material_name', 'Custom')}")
-        print(f"  Young's Modulus [Pa]: {self.config['young_modulus']}")
+        print(f"  Young's Modulus [MPa]: {self.config['young_modulus']}")
         print(f"  Poisson's Ratio [-]: {self.config['poisson_ratio']}")
-        print(f"  Density [kg/m^3]: {self.config['material_density']}")
-        print(f"  Yield Strength [Pa]: {self.config['yield_strength']}")
+        print(f"  Density [kg/mm^3]: {self.config['material_density']}")
+        print(f"  Yield Strength [MPa]: {self.config['yield_strength']}")
         if self.config.get('thermal_expansion', None) is not None:
             print(f"  Thermal Expansion [1/K]: {self.config['thermal_expansion']}")
         if self.config.get('fatigue_limit', None) is not None:
-            print(f"  Fatigue Limit [Pa]: {self.config['fatigue_limit']}")
+            print(f"  Fatigue Limit [MPa]: {self.config['fatigue_limit']}")
         if self.config.get('fracture_toughness', None) is not None:
-            print(f"  Fracture Toughness [MPa*sqrt(m)]: {self.config['fracture_toughness']}")
+            print(f"  Fracture Toughness [MPa*sqrt(mm)]: {self.config['fracture_toughness']}")
 
         if self.config.get('am_process_key', None):
             print(f"  AM Process: {self.config.get('am_process_name', self.config['am_process_key'])}")
@@ -307,8 +307,8 @@ class InteractiveTopologyOptimizer:
             self.material = MaterialModel(
                 E0=self.config['young_modulus'],
                 nu=self.config['poisson_ratio'],
-                density=self.config.get('material_density', 7800.0),
-                yield_strength=self.config.get('yield_strength', 250e6),
+                density=self.config.get('material_density', 7.8e-6),
+                yield_strength=self.config.get('yield_strength', 250.0),
                 thermal_expansion=self.config.get('thermal_expansion', None),
                 fatigue_limit=self.config.get('fatigue_limit', None),
                 fracture_toughness=self.config.get('fracture_toughness', None),
@@ -477,7 +477,7 @@ class InteractiveTopologyOptimizer:
                     self.config['stress_penalty_weight'] = float(self.config.get('stress_penalty_weight', 2.0))
 
                 if self.config.get('use_stress_constraint', True):
-                    ys = float(self.config.get('yield_strength', 250e6))
+                    ys = float(self.config.get('yield_strength', 250.0))
                     allowable = ys / max(float(self.config['safety_factor']), 1e-9)
                     status = 'ACTIVE' if self.config['use_stress_constraint'] else 'DISABLED'
                     print(f'\nStress constraint: {status}')

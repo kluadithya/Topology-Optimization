@@ -129,10 +129,10 @@ def run_cantilever_benchmark(element_order=2, target_elems=40000, P=-100.0, verb
         Contains analytical, FEA, and error values.
     """
     # Beam geometry and material
-    L = 0.300   # 300 mm length
-    W = 0.080   # 80 mm width
-    H = 0.060   # 60 mm height
-    E = 3.5e9   # PLA: 3.5 GPa
+    L = 300.0   # 300 mm length
+    W = 80.0    # 80 mm width
+    H = 60.0    # 60 mm height
+    E = 3500.0  # PLA: 3500 MPa
     nu = 0.36
 
     tet_label = 'Tet10' if element_order >= 2 else 'Tet4'
@@ -141,16 +141,16 @@ def run_cantilever_benchmark(element_order=2, target_elems=40000, P=-100.0, verb
         print(f'\n{"=" * 70}')
         print(f'CANTILEVER BEAM BENCHMARK -- {tet_label}')
         print(f'{"=" * 70}')
-        print(f'  Geometry: L={L*1000:.1f} mm, W={W*1000:.1f} mm, H={H*1000:.1f} mm')
-        print(f'  Material: E={E/1e9:.1f} GPa, nu={nu} (PLA)')
+        print(f'  Geometry: L={L:.1f} mm, W={W:.1f} mm, H={H:.1f} mm')
+        print(f'  Material: E={E:.1f} MPa, nu={nu} (PLA)')
         print(f'  Load: P={abs(P):.1f} N (uniform top surface, downward)')
         print(f'  Target elements: {target_elems}')
 
     # Analytical solution
     delta_EB, delta_Timo = _analytical_cantilever_tip_displacement(P, L, W, H, E, nu)
     if verbose:
-        print(f'\n  Analytical (Euler-Bernoulli): {abs(delta_EB)*1e6:.3f} um')
-        print(f'  Analytical (Timoshenko):     {abs(delta_Timo)*1e6:.3f} um')
+        print(f'\n  Analytical (Euler-Bernoulli): {abs(delta_EB)*1000.0:.3f} um')
+        print(f'  Analytical (Timoshenko):     {abs(delta_Timo)*1000.0:.3f} um')
 
     # Generate mesh
     if verbose:
@@ -207,8 +207,8 @@ def run_cantilever_benchmark(element_order=2, target_elems=40000, P=-100.0, verb
     error_pct = abs(fea_disp - analytical_ref) / max(analytical_ref, 1e-30) * 100.0
 
     if verbose:
-        print(f'\n  FEA max tip displacement: {fea_disp*1e6:.3f} um')
-        print(f'  Analytical (Timoshenko):  {analytical_ref*1e6:.3f} um')
+        print(f'\n  FEA max tip displacement: {fea_disp*1000.0:.3f} um')
+        print(f'  Analytical (Timoshenko):  {analytical_ref*1000.0:.3f} um')
         print(f'  Error: {error_pct:.2f}%')
         print(f'  Solve time: {t_solve:.2f}s')
 
@@ -224,9 +224,9 @@ def run_cantilever_benchmark(element_order=2, target_elems=40000, P=-100.0, verb
         'element_type': tet_label,
         'n_nodes': n_nodes,
         'n_elements': n_elems,
-        'analytical_EB_um': abs(delta_EB) * 1e6,
-        'analytical_Timo_um': abs(delta_Timo) * 1e6,
-        'fea_displacement_um': fea_disp * 1e6,
+        'analytical_EB_um': abs(delta_EB) * 1000.0,
+        'analytical_Timo_um': abs(delta_Timo) * 1000.0,
+        'fea_displacement_um': fea_disp * 1000.0,
         'error_vs_Timo_pct': error_pct,
         'solve_time_s': t_solve,
         'mesh_time_s': t_mesh,
@@ -241,10 +241,10 @@ def run_axial_bar_benchmark(element_order=2, target_elems=1000, verbose=True):
     This tests basic stiffness assembly correctness (no bending).
     Uses a compact bar (L/W = 5) for good mesh quality.
     """
-    L = 0.050   # 50 mm (L/W = 5)
-    W = 0.010   # 10 mm
-    H = 0.010   # 10 mm
-    E = 3.5e9   # PLA: 3.5 GPa
+    L = 50.0    # 50 mm (L/W = 5)
+    W = 10.0    # 10 mm
+    H = 10.0    # 10 mm
+    E = 3500.0  # PLA: 3500 MPa
     nu = 0.36
     P = 1000.0  # 1 kN tension
 
@@ -259,7 +259,7 @@ def run_axial_bar_benchmark(element_order=2, target_elems=1000, verbose=True):
     delta_analytical = P * L / (E * A)
 
     if verbose:
-        print(f'  Analytical: d = {delta_analytical*1e6:.4f} um')
+        print(f'  Analytical: d = {delta_analytical*1000.0:.4f} um')
 
     nodes, elements = _make_cantilever_beam_mesh(L, W, H, target_elems, element_order)
     n_nodes = nodes.shape[0]
@@ -306,8 +306,8 @@ def run_axial_bar_benchmark(element_order=2, target_elems=1000, verbose=True):
     error_pct = abs(fea_disp - delta_analytical) / max(delta_analytical, 1e-30) * 100.0
 
     if verbose:
-        print(f'  FEA displacement: {fea_disp*1e6:.4f} um')
-        print(f'  Analytical:       {delta_analytical*1e6:.4f} um')
+        print(f'  FEA displacement: {fea_disp*1000.0:.4f} um')
+        print(f'  Analytical:       {delta_analytical*1000.0:.4f} um')
         print(f'  Error: {error_pct:.2f}%')
         print(f'  Solve time: {t_solve:.2f}s')
         if error_pct < 5.0:
@@ -321,8 +321,8 @@ def run_axial_bar_benchmark(element_order=2, target_elems=1000, verbose=True):
         'test': 'axial_bar',
         'element_type': tet_label,
         'n_elements': n_elems,
-        'analytical_um': delta_analytical * 1e6,
-        'fea_displacement_um': fea_disp * 1e6,
+        'analytical_um': delta_analytical * 1000.0,
+        'fea_displacement_um': fea_disp * 1000.0,
         'error_pct': error_pct,
         'solve_time_s': t_solve,
         'pass': error_pct < 10.0,

@@ -81,11 +81,11 @@ def _run_case(method, nodes, elements, base_cfg, projection_enabled, bc_mode):
     cfg['use_min_member_projection'] = bool(projection_enabled)
 
     mat = MaterialModel(
-        E0=float(cfg.get('young_modulus', DEFAULT_CONFIG.get('young_modulus', 210e9))),
+        E0=float(cfg.get('young_modulus', DEFAULT_CONFIG.get('young_modulus', 210000.0))),
         nu=float(cfg.get('poisson_ratio', DEFAULT_CONFIG.get('poisson_ratio', 0.3))),
         rho_min=float(cfg.get('rho_min', DEFAULT_CONFIG.get('rho_min', 1e-6))) if 'rho_min' in cfg else 1e-6,
-        density=float(cfg.get('material_density', DEFAULT_CONFIG.get('material_density', 7800.0))),
-        yield_strength=float(cfg.get('yield_strength', DEFAULT_CONFIG.get('yield_strength', 250e6))),
+        density=float(cfg.get('material_density', DEFAULT_CONFIG.get('material_density', 7.8e-6))),
+        yield_strength=float(cfg.get('yield_strength', DEFAULT_CONFIG.get('yield_strength', 250.0))),
     )
 
     fixed_dofs, forces = _build_bc(nodes, bc_mode)

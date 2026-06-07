@@ -96,7 +96,7 @@ class SIMP3DOptimizer:
         if hasattr(material, 'get_allowable_stress'):
             self.allowable_stress = float(material.get_allowable_stress(self.safety_factor))
         else:
-            ys = float(getattr(material, 'yield_strength', config.get('yield_strength', 250e6)))
+            ys = float(getattr(material, 'yield_strength', config.get('yield_strength', 250.0)))
             self.allowable_stress = ys / max(self.safety_factor, 1e-9)
         self._stress_lambda = np.zeros(self.n_elements, dtype=np.float64)
 

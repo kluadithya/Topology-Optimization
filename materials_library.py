@@ -1,66 +1,66 @@
 """Material library for topology optimization presets.
 
 Users can add custom materials by editing this file.
-Units:
-- young_modulus_pa: Pa
+Units (N-mm-s consistent):
+- young_modulus_mpa: MPa (N/mm^2)
 - poisson_ratio: dimensionless
-- density_kg_m3: kg/m^3
-- yield_strength_pa: Pa
+- density_kg_mm3: kg/mm^3
+- yield_strength_mpa: MPa (N/mm^2)
 - thermal_expansion_1_K: 1/K
-- fatigue_limit_pa: Pa (fully reversed, approximate)
-- fracture_toughness_mpa_sqrt_m: MPa*sqrt(m)
+- fatigue_limit_mpa: MPa (N/mm^2) (fully reversed, approximate)
+- fracture_toughness_mpa_sqrt_mm: MPa*sqrt(mm)
 """
 
 MATERIAL_LIBRARY = {
     "steel_structural": {
         "display_name": "Steel (Structural)",
-        "young_modulus_pa": 210e9,
+        "young_modulus_mpa": 210000.0,
         "poisson_ratio": 0.30,
-        "density_kg_m3": 7850.0,
-        "yield_strength_pa": 250e6,
+        "density_kg_mm3": 7.85e-6,
+        "yield_strength_mpa": 250.0,
         "thermal_expansion_1_K": 12.0e-6,
-        "fatigue_limit_pa": 150e6,
-        "fracture_toughness_mpa_sqrt_m": 70.0,
+        "fatigue_limit_mpa": 150.0,
+        "fracture_toughness_mpa_sqrt_mm": 2213.6,
     },
     "aluminum_6061_t6": {
         "display_name": "Aluminum 6061-T6",
-        "young_modulus_pa": 68.9e9,
+        "young_modulus_mpa": 68900.0,
         "poisson_ratio": 0.33,
-        "density_kg_m3": 2700.0,
-        "yield_strength_pa": 276e6,
+        "density_kg_mm3": 2.70e-6,
+        "yield_strength_mpa": 276.0,
         "thermal_expansion_1_K": 23.6e-6,
-        "fatigue_limit_pa": 96e6,
-        "fracture_toughness_mpa_sqrt_m": 29.0,
+        "fatigue_limit_mpa": 96.0,
+        "fracture_toughness_mpa_sqrt_mm": 917.1,
     },
     "pla_3d_print": {
         "display_name": "PLA (3D Printing)",
-        "young_modulus_pa": 3.5e9,
+        "young_modulus_mpa": 3500.0,
         "poisson_ratio": 0.36,
-        "density_kg_m3": 1240.0,
-        "yield_strength_pa": 60e6,
+        "density_kg_mm3": 1.24e-6,
+        "yield_strength_mpa": 60.0,
         "thermal_expansion_1_K": 68.0e-6,
-        "fatigue_limit_pa": 20e6,
-        "fracture_toughness_mpa_sqrt_m": 3.5,
+        "fatigue_limit_mpa": 20.0,
+        "fracture_toughness_mpa_sqrt_mm": 110.7,
     },
     "abs_3d_print": {
         "display_name": "ABS (3D Printing)",
-        "young_modulus_pa": 2.1e9,
+        "young_modulus_mpa": 2100.0,
         "poisson_ratio": 0.35,
-        "density_kg_m3": 1040.0,
-        "yield_strength_pa": 40e6,
+        "density_kg_mm3": 1.04e-6,
+        "yield_strength_mpa": 40.0,
         "thermal_expansion_1_K": 80.0e-6,
-        "fatigue_limit_pa": 14e6,
-        "fracture_toughness_mpa_sqrt_m": 2.8,
+        "fatigue_limit_mpa": 14.0,
+        "fracture_toughness_mpa_sqrt_mm": 88.5,
     },
     "titanium_ti6al4v": {
         "display_name": "Titanium Ti-6Al-4V",
-        "young_modulus_pa": 114e9,
+        "young_modulus_mpa": 114000.0,
         "poisson_ratio": 0.34,
-        "density_kg_m3": 4430.0,
-        "yield_strength_pa": 830e6,
+        "density_kg_mm3": 4.43e-6,
+        "yield_strength_mpa": 830.0,
         "thermal_expansion_1_K": 8.6e-6,
-        "fatigue_limit_pa": 510e6,
-        "fracture_toughness_mpa_sqrt_m": 55.0,
+        "fatigue_limit_mpa": 510.0,
+        "fracture_toughness_mpa_sqrt_mm": 1739.3,
     },
 }
 

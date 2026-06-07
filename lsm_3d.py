@@ -106,7 +106,7 @@ class LSM3DOptimizer:
         self.use_stress_constraint = bool(config.get('use_stress_constraint', True))
         self.safety_factor = float(config.get('safety_factor', 1.5))
         self.stress_penalty_weight = float(config.get('stress_penalty_weight', 2.0))
-        ys = float(getattr(material, 'yield_strength', config.get('yield_strength', 250e6)))
+        ys = float(getattr(material, 'yield_strength', config.get('yield_strength', 250.0)))
         self.allowable_stress = ys / max(self.safety_factor, 1e-9)
 
         passive = config.get('passive_solid_elements', None)

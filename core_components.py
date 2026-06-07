@@ -16,17 +16,17 @@ class OptimizationMethod(Enum):
 class MaterialModel:
     """Material properties and SIMP penalization."""
     def __init__(self, E0=1.0, nu=0.3, rho_min=1e-6,
-                 density=1.0, yield_strength=1.0e9,
+                 density=1.0, yield_strength=250.0,
                  thermal_expansion=None, fatigue_limit=None, fracture_toughness=None,
                  anisotropy_factors=None, yield_anisotropy_factors=None, build_axis='z', process_name=None):
-        self.E0 = E0  # Young's modulus (reference stiffness, Pa)
+        self.E0 = E0  # Young's modulus (reference stiffness, MPa)
         self.nu = nu  # Poisson's ratio (dimensionless)
         self.rho_min = rho_min  # Minimum relative density (SIMP floor)
-        self.density = density  # Mass density (kg/m^3)
-        self.yield_strength = yield_strength  # Yield stress (Pa)
+        self.density = density  # Mass density (kg/mm^3)
+        self.yield_strength = yield_strength  # Yield stress (MPa)
         self.thermal_expansion = thermal_expansion  # Linear CTE (1/K)
-        self.fatigue_limit = fatigue_limit  # Approximate endurance limit (Pa)
-        self.fracture_toughness = fracture_toughness  # K_IC (MPa*sqrt(m))
+        self.fatigue_limit = fatigue_limit  # Approximate endurance limit (MPa)
+        self.fracture_toughness = fracture_toughness  # K_IC (MPa*sqrt(mm))
         self.anisotropy_factors = anisotropy_factors if anisotropy_factors else None
         self.yield_anisotropy_factors = yield_anisotropy_factors if yield_anisotropy_factors else None
         self.build_axis = build_axis if build_axis in ('x', 'y', 'z') else 'z'
@@ -421,10 +421,10 @@ DEFAULT_CONFIG = {
     'filter_radius_factor': 3.5,  # Radius = factor x median tet edge length
     'filter_radius': 1.5,  # Optional manual override when auto_filter_radius is False
     'thickness': 1.0,  # Element thickness
-    'young_modulus': 1.0,
+    'young_modulus': 200000.0,
     'poisson_ratio': 0.3,
-    'material_density': 7800.0,
-    'yield_strength': 250e6,
+    'material_density': 7.8e-6,
+    'yield_strength': 250.0,
     'thermal_expansion': None,
     'fatigue_limit': None,
     'fracture_toughness': None,

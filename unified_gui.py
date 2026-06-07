@@ -399,7 +399,7 @@ class UnifiedWorkflowGUI:
         # Build info overlay with stress statistics
         vm = self._stress_vm_all
         if vm is not None and len(vm) > 0:
-            ys = float(getattr(self.material, 'yield_strength', self.config.get('yield_strength', 250e6)))
+            ys = float(getattr(self.material, 'yield_strength', self.config.get('yield_strength', 250.0)))
             sf = float(self.config.get('safety_factor', 1.5))
             allowable = self._get_allowable_stress(sf)
             max_vm = float(np.max(vm))
@@ -697,7 +697,7 @@ class UnifiedWorkflowGUI:
         vm_post = self._post_stress_vm_all
         vm_pre = self._stress_vm_all
         if vm_post is not None and len(vm_post) > 0:
-            ys = float(getattr(self.material, 'yield_strength', self.config.get('yield_strength', 250e6)))
+            ys = float(getattr(self.material, 'yield_strength', self.config.get('yield_strength', 250.0)))
             sf = float(self.config.get('safety_factor', 1.5))
             allowable = self._get_allowable_stress(sf)
 
@@ -1551,7 +1551,7 @@ class UnifiedWorkflowGUI:
                 return 'STAGE: Stress Analysis\nRunning static FEA...'
             vm = self._stress_vm_all
             if vm is not None and len(vm) > 0:
-                ys = float(getattr(self.material, 'yield_strength', self.config.get('yield_strength', 250e6)))
+                ys = float(getattr(self.material, 'yield_strength', self.config.get('yield_strength', 250.0)))
                 sf = float(self.config.get('safety_factor', 1.5))
                 allowable = self._get_allowable_stress(sf)
                 max_vm = float(np.max(vm))
@@ -1572,7 +1572,7 @@ class UnifiedWorkflowGUI:
         if self._stage == self.STAGE_POST_STRESS:
             vm = self._post_stress_vm_all
             if vm is not None and len(vm) > 0:
-                ys = float(getattr(self.material, 'yield_strength', self.config.get('yield_strength', 250e6)))
+                ys = float(getattr(self.material, 'yield_strength', self.config.get('yield_strength', 250.0)))
                 sf = float(self.config.get('safety_factor', 1.5))
                 allowable = self._get_allowable_stress(sf)
                 max_vm = float(np.max(vm))
@@ -2319,7 +2319,7 @@ class UnifiedWorkflowGUI:
             vm_all = fea.calculate_stress_all_gauss(u, rho_bin, pen)
             max_vm = float(np.max(vm_all)) if vm_all.size else 0.0
 
-            ys = float(getattr(self.material, 'yield_strength', self.config.get('yield_strength', 250e6)))
+            ys = float(getattr(self.material, 'yield_strength', self.config.get('yield_strength', 250.0)))
             sf = float(self.config.get('safety_factor', 1.5))
             allowable = self._get_allowable_stress(sf)
             sf_margin = allowable / max(max_vm, 1e-12)
@@ -2338,7 +2338,7 @@ class UnifiedWorkflowGUI:
             a_min_m = None
             if fracture_toughness is not None:
                 kic = float(fracture_toughness)
-                sigma_mpa = max_vm / 1e6
+                sigma_mpa = max_vm
                 if kic > 0.0 and sigma_mpa > 1e-12:
                     a_min_m = ((kic / sigma_mpa) ** 2) / np.pi
 
@@ -2363,16 +2363,14 @@ class UnifiedWorkflowGUI:
                 return float(self.material.get_allowable_stress(sf))
             except Exception:
                 pass
-        ys = float(getattr(self.material, 'yield_strength', self.config.get('yield_strength', 250e6)))
+        ys = float(getattr(self.material, 'yield_strength', self.config.get('yield_strength', 250.0)))
         return ys / max(sf, 1e-12)
 
     def _compute_mass_report(self, rho):
-        """Compute mass report with automatic unit-scale detection.
-
-        CAD files typically use mm coordinates, but material density is in
-        kg/m³ (SI).  We detect the coordinate system by checking the bounding
-        box diagonal: if it exceeds 0.5 (unlikely in metres for typical parts),
-        we assume mm and convert volumes from mm³ → m³ (factor 1e-9).
+        """Compute mass report assuming mm native units.
+        
+        Density is expected in kg/mm³.
+        Mass = Volume(mm³) * Density(kg/mm³) = kg
         """
         try:
             rr = np.asarray(rho, dtype=np.float64)
@@ -2388,21 +2386,9 @@ class UnifiedWorkflowGUI:
             d = nodes[corners[:, 3]]
             vol = np.abs(np.einsum('ij,ij->i', np.cross(b - a, c - a), d - a)) / 6.0
 
-            # Auto-detect coordinate units.
-            # If the bounding box diagonal is > 0.5, coordinates are almost
-            # certainly in mm (a 0.5 m part is 500 mm; most CAD exports use mm).
-            bbox_diag = float(np.linalg.norm(
-                np.max(nodes, axis=0) - np.min(nodes, axis=0)))
-            if bbox_diag > 0.5:
-                # Coordinates are in mm → volumes are in mm³ → convert to m³
-                vol_scale = 1e-9
-            else:
-                # Coordinates already in metres
-                vol_scale = 1.0
-
-            mat_rho = float(getattr(self.material, 'density', self.config.get('material_density', 7800.0)))
-            mass_baseline = float(np.sum(vol) * vol_scale * mat_rho)
-            mass_current = float(np.sum(vol * np.clip(rr, 0.0, 1.0)) * vol_scale * mat_rho)
+            mat_rho = float(getattr(self.material, 'density', self.config.get('material_density', 7.8e-6)))
+            mass_baseline = float(np.sum(vol) * mat_rho)
+            mass_current = float(np.sum(vol * np.clip(rr, 0.0, 1.0)) * mat_rho)
             saved_pct = 100.0 * max(0.0, mass_baseline - mass_current) / max(mass_baseline, 1e-12)
 
             return {
@@ -3021,7 +3007,7 @@ class UnifiedWorkflowGUI:
             stress_summary = ''
             vm_post = self._post_stress_vm_all
             if vm_post is not None and len(vm_post) > 0:
-                ys = float(getattr(self.material, 'yield_strength', self.config.get('yield_strength', 250e6)))
+                ys = float(getattr(self.material, 'yield_strength', self.config.get('yield_strength', 250.0)))
                 sf = float(self.config.get('safety_factor', 1.5))
                 allowable = self._get_allowable_stress(sf)
                 max_vm = float(np.max(vm_post))
@@ -3346,6 +3332,7 @@ class _QueueVisualizer:
 
     def close(self):
         pass
+
 
 
 
