@@ -1397,7 +1397,17 @@ class UnifiedWorkflowGUI:
         self._redraw_bc_indicators()
         self._update_overlays()
 
-    def _key_mag_scale(self, factor):
+    def _clear_scalar_bars(self):
+        try:
+            if hasattr(self._plotter, 'scalar_bars'):
+                for title in list(self._plotter.scalar_bars.keys()):
+                    self._plotter.remove_scalar_bar(title)
+            else:
+                self._plotter.remove_scalar_bar()
+        except Exception:
+            pass
+
+    def _safe_remove_actor(self, actor):
         if self._stage != self.STAGE_BC:
             return
         f = float(factor)
@@ -1651,7 +1661,7 @@ class UnifiedWorkflowGUI:
                 'R=Re-optimize (adjust VF & re-run)\n'
                 'Q=Quit  F=Fit  1-7=Views')
         if self._stage == self.STAGE_RESULTS:
-            return 'R=Re-optimize  Q=Quit  F=Fit  1-7=Views'
+            return 'R=Re-optimize  Q=Quit & EXPORT  F=Fit  1-7=Views'
         return ''
 
     def _add_surface_mesh(self, opacity=0.97, show_edges=True, edge_color=None):
@@ -3069,6 +3079,7 @@ class UnifiedWorkflowGUI:
             except Exception:
                 visible = grid
 
+            self._clear_scalar_bars()
             self._density_actor = p.add_mesh(
                 visible,
                 scalars='density' if 'density' in visible.array_names else None,
@@ -3137,7 +3148,7 @@ class UnifiedWorkflowGUI:
                 f'{stress_summary}'
                 f'{mass_summary}'
                 f'{reopt_label}\n\n'
-                f'R=Re-optimize  Q=Exit'
+                f'Q=Quit & EXPORT  |  R=Re-optimize'
             )
             self._info_actor = self._plotter.add_text(info, position='upper_left', font_size=11, color='white')
         else:
