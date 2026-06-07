@@ -72,7 +72,7 @@ class UnifiedWorkflowGUI:
         self._pick_scope = 'NODE'
 
         self._load_direction = 2 if mode == '3D' else 1
-        self._load_magnitude = -500.0
+        self._load_magnitude = 0.0
 
         self.rho_result = None
         self.compliance_result = None
@@ -1529,7 +1529,9 @@ class UnifiedWorkflowGUI:
         if self._stage == self.STAGE_BC:
             load_line = ''
             if len(self.loads) > 0:
-                load_line = f'Load tool: dir={self._load_direction} mag={self._load_magnitude:.1f} N\n'
+                axis = ['X', 'Y', 'Z'][int(self._load_direction)] if 0 <= self._load_direction <= 2 else '?'
+                sign = '+' if self._load_magnitude >= 0 else '-'
+                load_line = f'Load tool: [{axis}{sign}] mag={abs(self._load_magnitude):.1f} N\n'
             return (
                 f'STAGE: Support and Force Define\n'
                 f'Mode : {self._bc_mode}\n'
@@ -2716,11 +2718,12 @@ class UnifiedWorkflowGUI:
             shaft_len = arrow_len - tip_len
             d_vec = np.zeros(3, dtype=np.float64)
             d_vec[load_dir] = load_sign
-            offset = self._ind_size * 1.8 + arrow_len * 0.2
+            padding = self._ind_size * 0.5 + arrow_len * 0.6
             for k in range(len(ld_pts)):
                 pt = ld_pts[k]
                 nk = ld_nrm[k] if ld_nrm is not None and k < len(ld_nrm) else np.array([0, 0, 1.0])
-                base = pt + nk * offset
+                center = pt + nk * padding
+                base = center - d_vec * (arrow_len * 0.5)
                 try:
                     shaft_end = base + d_vec * shaft_len
                     line = pv.Line(base, shaft_end, resolution=1)
