@@ -415,7 +415,7 @@ class UnifiedWorkflowGUI:
                 u3 = u.reshape(-1, 3)
                 disp_mag = np.linalg.norm(u3, axis=1)
                 max_disp = float(np.max(disp_mag))
-                disp_info = f'\nMax displacement: {max_disp:.3e}'
+                disp_info = f'\nMax displacement: {max_disp:.3e} mm'
 
             # Suggest volume fraction based on stress distribution
             # Elements below 20% of max stress are generally safe to remove
@@ -424,12 +424,12 @@ class UnifiedWorkflowGUI:
 
             info = (
                 f'STATIC STRESS ANALYSIS\n'
-                f'Max von Mises: {max_vm:.3e} Pa\n'
-                f'Mean von Mises: {mean_vm:.3e} Pa\n'
-                f'Median von Mises: {median_vm:.3e} Pa\n'
-                f'Min von Mises: {min_vm:.3e} Pa\n'
-                f'\nYield: {ys:.3e} Pa  SF: {sf:.1f}\n'
-                f'Allowable: {allowable:.3e} Pa\n'
+                f'Max von Mises: {max_vm:.3e} MPa\n'
+                f'Mean von Mises: {mean_vm:.3e} MPa\n'
+                f'Median von Mises: {median_vm:.3e} MPa\n'
+                f'Min von Mises: {min_vm:.3e} MPa\n'
+                f'\nYield: {ys:.3e} MPa  SF: {sf:.1f}\n'
+                f'Allowable: {allowable:.3e} MPa\n'
                 f'Utilization: {util:.1f}%'
                 f'{disp_info}\n'
                 f'\nSuggested VF: ~{suggest_vf:.2f}\n'
@@ -449,7 +449,7 @@ class UnifiedWorkflowGUI:
         print('  STRESS ANALYSIS COMPLETE')
         print('  ========================================================')
         if vm is not None and len(vm) > 0:
-            print(f'  Max von Mises stress: {float(np.max(vm)):.3e} Pa')
+            print(f'  Max von Mises stress: {float(np.max(vm)):.3e} MPa')
             print(f'  Suggested volume fraction: ~{suggest_vf:.2f}')
         print('  Press V in the GUI to set volume fraction / mass reduction.')
         print('  Press N to proceed to optimization, B to go back to BCs.')
@@ -517,7 +517,7 @@ class UnifiedWorkflowGUI:
 
         max_vm = float(np.max(vm_all)) if len(vm_all) > 0 else 0.0
         mean_vm = float(np.mean(vm_all)) if len(vm_all) > 0 else 0.0
-        print(f'  [STRESS] Done. Max VM={max_vm:.3e} Pa, Mean VM={mean_vm:.3e} Pa')
+        print(f'  [STRESS] Done. Max VM={max_vm:.3e} MPa, Mean VM={mean_vm:.3e} MPa')
         print(f'  [STRESS] Timing: init={t1-t0:.2f}s, solve={t2-t1:.2f}s, stress={t3-t2:.2f}s, total={t3-t0:.2f}s')
 
     def _draw_stress_heatmap(self):
@@ -582,14 +582,15 @@ class UnifiedWorkflowGUI:
                 pickable=False,
                 show_scalar_bar=True,
                 scalar_bar_args={
-                    'title': 'Von Mises Stress (Pa)',
+                    'title': 'Von Mises Stress (MPa)',
                     'color': 'white',
                     'fmt': '%.2e',
                     'n_labels': 7,
-                    'position_x': 0.05,
-                    'position_y': 0.05,
-                    'width': 0.35,
-                    'height': 0.06,
+                    'vertical': True,
+                    'position_x': 0.85,
+                    'position_y': 0.15,
+                    'width': 0.08,
+                    'height': 0.7,
                 },
                 smooth_shading=True,
                 ambient=0.25,
@@ -712,7 +713,7 @@ class UnifiedWorkflowGUI:
                 u3 = u.reshape(-1, 3)
                 disp_mag = np.linalg.norm(u3, axis=1)
                 max_disp = float(np.max(disp_mag))
-                disp_info = f'\nMax displacement: {max_disp:.3e}'
+                disp_info = f'\nMax displacement: {max_disp:.3e} mm'
 
             # Safety margin
             sf_margin = allowable / max(max_vm_post, 1e-12)
@@ -736,8 +737,8 @@ class UnifiedWorkflowGUI:
                 stress_change = ((max_vm_post - max_vm_pre) / max(max_vm_pre, 1e-12)) * 100.0
                 compare_info = (
                     f'\n\nPRE vs POST COMPARISON\n'
-                    f'Pre-opt max VM: {max_vm_pre:.3e} Pa\n'
-                    f'Post-opt max VM: {max_vm_post:.3e} Pa\n'
+                    f'Pre-opt max VM: {max_vm_pre:.3e} MPa\n'
+                    f'Post-opt max VM: {max_vm_post:.3e} MPa\n'
                     f'Change: {stress_change:+.1f}%\n'
                     f'Pre-opt util: {util_pre:.1f}%\n'
                     f'Post-opt util: {util_post:.1f}%'
@@ -756,10 +757,10 @@ class UnifiedWorkflowGUI:
             info = (
                 f'POST-OPTIMIZATION STRESS ANALYSIS{reopt_label}\n'
                 f'Status: {verdict}\n\n'
-                f'Max von Mises: {max_vm_post:.3e} Pa\n'
-                f'Mean von Mises: {mean_vm_post:.3e} Pa\n'
-                f'Yield: {ys:.3e} Pa  SF: {sf:.1f}\n'
-                f'Allowable: {allowable:.3e} Pa\n'
+                f'Max von Mises: {max_vm_post:.3e} MPa\n'
+                f'Mean von Mises: {mean_vm_post:.3e} MPa\n'
+                f'Yield: {ys:.3e} MPa  SF: {sf:.1f}\n'
+                f'Allowable: {allowable:.3e} MPa\n'
                 f'Utilization: {util_post:.1f}%\n'
                 f'Safety margin: {sf_margin:.2f}x'
                 f'{disp_info}'
@@ -775,7 +776,7 @@ class UnifiedWorkflowGUI:
             print(f'  POST-OPTIMIZATION STRESS ANALYSIS{reopt_label}')
             print(f'  ========================================================')
             print(f'  Verdict: {verdict}')
-            print(f'  Max von Mises: {max_vm_post:.3e} Pa')
+            print(f'  Max von Mises: {max_vm_post:.3e} MPa')
             print(f'  Utilization: {util_post:.1f}%')
             print(f'  Safety margin: {sf_margin:.2f}x')
             if mass_report is not None:
@@ -829,7 +830,7 @@ class UnifiedWorkflowGUI:
 
         max_vm = float(np.max(vm_all)) if len(vm_all) > 0 else 0.0
         mean_vm = float(np.mean(vm_all)) if len(vm_all) > 0 else 0.0
-        print(f'  [POST-STRESS] Done. Max VM={max_vm:.3e} Pa, Mean VM={mean_vm:.3e} Pa')
+        print(f'  [POST-STRESS] Done. Max VM={max_vm:.3e} MPa, Mean VM={mean_vm:.3e} MPa')
 
     def _draw_post_stress_heatmap(self):
         """Draw per-element von Mises stress on optimized (solid) elements only."""
@@ -894,14 +895,15 @@ class UnifiedWorkflowGUI:
                 pickable=False,
                 show_scalar_bar=True,
                 scalar_bar_args={
-                    'title': 'Von Mises Stress - Optimized (Pa)',
+                    'title': 'Von Mises Stress - Optimized (MPa)',
                     'color': 'white',
                     'fmt': '%.2e',
                     'n_labels': 7,
-                    'position_x': 0.05,
-                    'position_y': 0.05,
-                    'width': 0.35,
-                    'height': 0.06,
+                    'vertical': True,
+                    'position_x': 0.85,
+                    'position_y': 0.15,
+                    'width': 0.08,
+                    'height': 0.7,
                 },
                 smooth_shading=True,
                 ambient=0.25,
@@ -1510,7 +1512,7 @@ class UnifiedWorkflowGUI:
                 p.remove_actor(self._status_actor)
             except Exception:
                 pass
-        self._status_actor = p.add_text(self._status_text(), position='upper_right', font_size=12, color='white')
+        self._status_actor = None  # Removed top-right status actor per user request
 
         if self._help_actor is not None:
             try:
@@ -1560,10 +1562,10 @@ class UnifiedWorkflowGUI:
                 vf_status = f'VF = {self.config.get("volume_fraction", 0.3):.3f}' if self._vf_entered else 'VF = Not set yet (press V)'
                 return (
                     f'STAGE: Stress Analysis\n'
-                    f'Max VM: {max_vm:.3e} Pa\n'
-                    f'Mean VM: {mean_vm:.3e} Pa\n'
-                    f'Yield: {ys:.3e} Pa  SF: {sf:.1f}\n'
-                    f'Allowable: {allowable:.3e} Pa\n'
+                    f'Max VM: {max_vm:.3e} MPa\n'
+                    f'Mean VM: {mean_vm:.3e} MPa\n'
+                    f'Yield: {ys:.3e} MPa  SF: {sf:.1f}\n'
+                    f'Allowable: {allowable:.3e} MPa\n'
                     f'Utilization: {util:.1f}%\n'
                     f'{vf_status}')
             return 'STAGE: Stress Analysis\nNo stress data'
@@ -1582,7 +1584,7 @@ class UnifiedWorkflowGUI:
                 return (
                     f'STAGE: Post-Opt Stress{reopt_label}\n'
                     f'Status: {verdict}\n'
-                    f'Max VM: {max_vm:.3e} Pa\n'
+                    f'Max VM: {max_vm:.3e} MPa\n'
                     f'Utilization: {util:.1f}%')
             return 'STAGE: Post-Opt Stress\nAnalysing...'
         if self._stage == self.STAGE_RESULTS:
@@ -2988,7 +2990,17 @@ class UnifiedWorkflowGUI:
                 opacity=0.92,
                 pickable=False,
                 show_scalar_bar=True,
-                scalar_bar_args={'title':'Density', 'color':'white', 'fmt':'%.2f', 'n_labels':5},
+                scalar_bar_args={
+                    'title': 'Density',
+                    'color': 'white',
+                    'fmt': '%.2f',
+                    'n_labels': 5,
+                    'vertical': True,
+                    'position_x': 0.85,
+                    'position_y': 0.15,
+                    'width': 0.08,
+                    'height': 0.7,
+                },
             )
         except Exception as e:
             print(f'  [VIEWER] Draw error: {e}')
@@ -3015,7 +3027,7 @@ class UnifiedWorkflowGUI:
                 verdict = 'PASS' if util <= 100.0 else 'FAIL'
                 stress_summary = (
                     f'\nStress check: {verdict}\n'
-                    f'Max VM: {max_vm:.3e} Pa\n'
+                    f'Max VM: {max_vm:.3e} MPa\n'
                     f'Utilization: {util:.1f}%'
                 )
 
