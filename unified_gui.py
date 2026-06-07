@@ -14,6 +14,10 @@ from pathlib import Path
 
 try:
     import pyvista as pv
+    import warnings
+    if hasattr(pv, 'PyVistaFutureWarning'):
+        warnings.filterwarnings('ignore', category=pv.PyVistaFutureWarning)
+    warnings.filterwarnings('ignore', message='.*extract_surface.*')
     _HAS_PYVISTA = True
 except ImportError:
     pv = None
@@ -159,6 +163,11 @@ class UnifiedWorkflowGUI:
 
     def _create_plotter(self):
         p = pv.Plotter(title='Topology Optimization - Unified Workflow', window_size=(1600, 950))
+        # Patch for PyVista strict-mode crash during picking
+        try:
+            pv.set_new_attribute(p, 'pickpoint', None)
+        except Exception:
+            pass
         p.background_color = self._COL_BG
         try:
             axes_actor = p.add_axes(line_width=3, xlabel='X', ylabel='Y', zlabel='Z')
@@ -1075,13 +1084,18 @@ class UnifiedWorkflowGUI:
             centers = self.nodes[faces].mean(axis=1)
             fidx = int(np.argmin(np.linalg.norm(centers - coords.reshape(1, 3), axis=1)))
             face_idx = self._group_face_region(faces, fidx)
-            face_group = faces[face_idx]
+            
+            # Use full topological boundary faces (which include midside nodes) if available
+            if self._boundary_faces_cache is not None and face_idx.max() < self._boundary_faces_cache.shape[0]:
+                face_group = self._boundary_faces_cache[face_idx]
+            else:
+                face_group = faces[face_idx]
 
             picked_nodes = sorted(set(int(n) for n in face_group.reshape(-1).tolist()))
             self._last_pick_meta = {'scope': 'FACE', 'n_nodes': len(picked_nodes), 'n_faces': int(face_group.shape[0]), 'n_edges': 0, 'face_indices': [int(i) for i in face_idx.tolist()]}
             cg = self.nodes[face_group.reshape(-1)].reshape(-1, 3).mean(axis=0)
             print(f'  Picked face region with {face_group.shape[0]} triangle(s), {len(picked_nodes)} nodes @ ({cg[0]:.2f}, {cg[1]:.2f}, {cg[2]:.2f})')
-            self._show_face_highlight(face_group)
+            self._show_face_highlight(faces[face_idx])  # Highlight only corners for PyVista
             return picked_nodes
 
         edges = self._get_surface_edges()
