@@ -426,10 +426,20 @@ class UnifiedWorkflowGUI:
                 max_disp = float(np.max(disp_mag))
                 disp_info = f'\nMax displacement: {max_disp:.3e} mm'
 
-            # Suggest volume fraction based on stress distribution
-            # Elements below 20% of max stress are generally safe to remove
-            low_stress_frac = float(np.sum(vm < 0.20 * max_vm)) / max(len(vm), 1)
-            suggest_vf = float(np.clip(1.0 - low_stress_frac * 0.8, 0.15, 0.85))
+            # Suggest volume fraction based on absolute Yield Limits and stress utilization
+            if util >= 100.0:
+                suggest_vf_str = '1.00 (WARNING: Fails yield limit)'
+                vf_note = '(Solid structure is yielding, no material removal suggested)'
+            elif util > 80.0:
+                low_stress_frac = float(np.sum(vm < 0.20 * allowable)) / max(len(vm), 1)
+                suggest_vf = float(np.clip(1.0 - low_stress_frac * 0.5, 0.70, 0.95))
+                suggest_vf_str = f'~{suggest_vf:.2f}'
+                vf_note = f'(~{low_stress_frac*100:.0f}% elements <20% allowable. High utilization)'
+            else:
+                low_stress_frac = float(np.sum(vm < 0.20 * allowable)) / max(len(vm), 1)
+                suggest_vf = float(np.clip(1.0 - low_stress_frac * 0.8, 0.15, 0.85))
+                suggest_vf_str = f'~{suggest_vf:.2f}'
+                vf_note = f'(~{low_stress_frac*100:.0f}% elements <20% allowable)'
 
             info = (
                 f'STATIC STRESS ANALYSIS\n'
@@ -441,8 +451,8 @@ class UnifiedWorkflowGUI:
                 f'Allowable: {allowable:.3e} MPa\n'
                 f'Utilization: {util:.1f}%'
                 f'{disp_info}\n'
-                f'\nSuggested VF: ~{suggest_vf:.2f}\n'
-                f'(~{low_stress_frac*100:.0f}% elements at <20% peak stress)\n'
+                f'\nSuggested VF: {suggest_vf_str}\n'
+                f'{vf_note}\n'
                 f'\nPress V to set volume fraction'
             )
             self._info_actor = self._plotter.add_text(info, position='upper_left', font_size=11, color='white')
