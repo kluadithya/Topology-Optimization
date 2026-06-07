@@ -588,9 +588,9 @@ class UnifiedWorkflowGUI:
                     'n_labels': 7,
                     'vertical': True,
                     'position_x': 0.85,
-                    'position_y': 0.15,
+                    'position_y': 0.25,
                     'width': 0.08,
-                    'height': 0.7,
+                    'height': 0.6,
                 },
                 smooth_shading=True,
                 ambient=0.25,
@@ -901,9 +901,9 @@ class UnifiedWorkflowGUI:
                     'n_labels': 7,
                     'vertical': True,
                     'position_x': 0.85,
-                    'position_y': 0.15,
+                    'position_y': 0.25,
                     'width': 0.08,
-                    'height': 0.7,
+                    'height': 0.6,
                 },
                 smooth_shading=True,
                 ambient=0.25,
@@ -1512,7 +1512,11 @@ class UnifiedWorkflowGUI:
                 p.remove_actor(self._status_actor)
             except Exception:
                 pass
-        self._status_actor = None  # Removed top-right status actor per user request
+        
+        if self._stage == self.STAGE_BC:
+            self._status_actor = p.add_text(self._status_text(), position='upper_left', font_size=14, color='white')
+        else:
+            self._status_actor = None
 
         if self._help_actor is not None:
             try:
@@ -1525,9 +1529,9 @@ class UnifiedWorkflowGUI:
         if self._stage == self.STAGE_BC:
             load_line = ''
             if len(self.loads) > 0:
-                load_line = f'Load tool: dir={self._load_direction} mag={self._load_magnitude:.1f} N\\n'
+                load_line = f'Load tool: dir={self._load_direction} mag={self._load_magnitude:.1f} N\n'
             return (
-                f'STAGE: BC Definition\n'
+                f'STAGE: Support and Force Define\n'
                 f'Mode : {self._bc_mode}\n'
                 f'Pick : {self._pick_scope}\n'
                 f'{load_line}'
@@ -2789,7 +2793,7 @@ class UnifiedWorkflowGUI:
             f'Type: {tet_type}  Quality: {quality}\n'
             f'Domain size: {float(np.max(np.ptp(self.nodes, axis=0))):.2f}'
         )
-        self._info_actor = self._plotter.add_text(info, position='lower_left', font_size=12, color='white')
+        self._info_actor = self._plotter.add_text(info, position='upper_right', font_size=12, color='white')
 
         if n_per in (4, 10):
             q = self._check_tet_quality(self._original_nodes, self._original_elements)
@@ -2997,9 +3001,9 @@ class UnifiedWorkflowGUI:
                     'n_labels': 5,
                     'vertical': True,
                     'position_x': 0.85,
-                    'position_y': 0.15,
+                    'position_y': 0.25,
                     'width': 0.08,
-                    'height': 0.7,
+                    'height': 0.6,
                 },
             )
         except Exception as e:
