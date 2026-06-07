@@ -1743,8 +1743,16 @@ class UnifiedWorkflowGUI:
 
             with np.errstate(divide='ignore', invalid='ignore'):
                 aspect = np.sqrt(l2_max / np.maximum(l2_min, 1e-30))
+                # Element Quality Q = C * V / (sum(L_i^2))^1.5
+                # For regular tet, C = 72 * sqrt(3) ~= 124.707658
+                element_quality = 124.707658 * abs_vol / np.maximum((l2_sum)**1.5, 1e-30)
+
             poor = aspect > 20.0
             q['poor_aspect_count'] = int(np.sum(poor))
+            q['max_aspect'] = float(np.max(aspect)) if len(aspect) > 0 else 0.0
+            q['mean_aspect'] = float(np.mean(aspect)) if len(aspect) > 0 else 0.0
+            q['min_quality'] = float(np.min(element_quality)) if len(element_quality) > 0 else 0.0
+            q['mean_quality'] = float(np.mean(element_quality)) if len(element_quality) > 0 else 0.0
             return q
         except Exception:
             return q
@@ -2805,12 +2813,17 @@ class UnifiedWorkflowGUI:
             q_inverted = q['inverted_count']
             q_poor = q['poor_aspect_count']
             q_poor_pct = 100.0 * q_poor / max(q['total'], 1)
+            q_mean_aspect = q.get('mean_aspect', 0.0)
+            q_max_aspect = q.get('max_aspect', 0.0)
+            q_mean_qual = q.get('mean_quality', 0.0)
+            q_min_qual = q.get('min_quality', 0.0)
             qtxt = (
                 'MESH QUALITY\n'
                 f'Status: {q_status}\n'
-                f'Invalid: {q_invalid}\n'
-                f'Inverted: {q_inverted}\n'
-                f'Poor aspect: {q_poor} ({q_poor_pct:.1f}%)'
+                f'Invalid: {q_invalid}  Inverted: {q_inverted}\n'
+                f'Poor aspect (>20): {q_poor} ({q_poor_pct:.1f}%)\n'
+                f'Aspect Ratio: mean {q_mean_aspect:.2f}, max {q_max_aspect:.2f}\n'
+                f'Element Quality: mean {q_mean_qual:.3f}, min {q_min_qual:.3f}'
             )
             self._quality_actor = self._plotter.add_text(qtxt, position='upper_left', font_size=14, color='#00d26a')
         else:
