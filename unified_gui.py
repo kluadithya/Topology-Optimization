@@ -1731,9 +1731,11 @@ class UnifiedWorkflowGUI:
             # Simple shape metric: max edge / min edge ratio
             l2_min = None
             l2_max = None
+            l2_sum = np.zeros(q['total'], dtype=np.float64)
             for i, j in ((0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)):
                 e = n[corners[:, i]] - n[corners[:, j]]
                 l2 = np.einsum('ij,ij->i', e, e)
+                l2_sum += l2
                 if l2_min is None:
                     l2_min = l2.copy()
                     l2_max = l2.copy()
@@ -1748,11 +1750,15 @@ class UnifiedWorkflowGUI:
                 element_quality = 124.707658 * abs_vol / np.maximum((l2_sum)**1.5, 1e-30)
 
             poor = aspect > 20.0
+            skewness = np.clip(1.0 - element_quality, 0.0, 1.0)
+            
             q['poor_aspect_count'] = int(np.sum(poor))
             q['max_aspect'] = float(np.max(aspect)) if len(aspect) > 0 else 0.0
             q['mean_aspect'] = float(np.mean(aspect)) if len(aspect) > 0 else 0.0
             q['min_quality'] = float(np.min(element_quality)) if len(element_quality) > 0 else 0.0
             q['mean_quality'] = float(np.mean(element_quality)) if len(element_quality) > 0 else 0.0
+            q['max_skewness'] = float(np.max(skewness)) if len(skewness) > 0 else 0.0
+            q['mean_skewness'] = float(np.mean(skewness)) if len(skewness) > 0 else 0.0
             return q
         except Exception:
             return q
@@ -2817,13 +2823,16 @@ class UnifiedWorkflowGUI:
             q_max_aspect = q.get('max_aspect', 0.0)
             q_mean_qual = q.get('mean_quality', 0.0)
             q_min_qual = q.get('min_quality', 0.0)
+            q_mean_skew = q.get('mean_skewness', 0.0)
+            q_max_skew = q.get('max_skewness', 0.0)
             qtxt = (
                 'MESH QUALITY\n'
                 f'Status: {q_status}\n'
                 f'Invalid: {q_invalid}  Inverted: {q_inverted}\n'
                 f'Poor aspect (>20): {q_poor} ({q_poor_pct:.1f}%)\n'
                 f'Aspect Ratio: mean {q_mean_aspect:.2f}, max {q_max_aspect:.2f}\n'
-                f'Element Quality: mean {q_mean_qual:.3f}, min {q_min_qual:.3f}'
+                f'Element Quality: mean {q_mean_qual:.3f}, min {q_min_qual:.3f}\n'
+                f'Skewness: mean {q_mean_skew:.3f}, max {q_max_skew:.3f}'
             )
             self._quality_actor = self._plotter.add_text(qtxt, position='upper_left', font_size=14, color='#00d26a')
         else:
