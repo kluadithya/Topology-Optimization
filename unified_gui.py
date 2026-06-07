@@ -1828,10 +1828,32 @@ class UnifiedWorkflowGUI:
         fixed_dofs = np.array(fixed_dofs, dtype=int) if fixed_dofs else np.array([], dtype=int)
 
         forces = np.zeros(n_nodes * ndim)
-        for node, load in self.loads.items():
-            dof = node * ndim + load['dir']
-            if dof < len(forces):
-                forces[dof] = load['mag']
+        
+        # Area-weighted consistent nodal force distribution for face loads
+        if self.mode == '3D' and len(self._load_face_indices) > 0:
+            from fea_solver_3d import distribute_surface_traction
+            # Use the full topological boundary faces (which may have 6 nodes for Tet10)
+            if self._boundary_faces_cache is None:
+                self._boundary_faces_cache = self._extract_boundary_faces_from_tets(self.elements)
+            topological_faces = self._boundary_faces_cache
+            
+            if topological_faces is not None:
+                load_triangles = topological_faces[list(self._load_face_indices)]
+                
+                # Determine total force vector from the user's input
+                # The sum of magnitudes in self.loads gives the total magnitude intended by the user
+                total_f = np.zeros(3)
+                for node, load in self.loads.items():
+                    total_f[load['dir']] += load['mag']
+                
+                if np.linalg.norm(total_f) > 1e-12:
+                    dist_forces = distribute_surface_traction(self._original_nodes, load_triangles, total_f)
+                    forces += dist_forces
+        else:
+            for node, load in self.loads.items():
+                dof = node * ndim + load['dir']
+                if dof < len(forces):
+                    forces[dof] = load['mag']
 
         return fixed_dofs, forces
     def _build_passive_solid_mask(self):
@@ -2457,7 +2479,7 @@ class UnifiedWorkflowGUI:
         if n_per in (4, 10):
             if self._boundary_faces_cache is None:
                 self._boundary_faces_cache = self._extract_boundary_faces_from_tets(self.elements)
-            return self._boundary_faces_cache
+            return self._boundary_faces_cache[:, :3]
         return None
 
     def _get_surface_edges(self):
@@ -2483,15 +2505,27 @@ class UnifiedWorkflowGUI:
         if t.ndim != 2 or t.shape[1] < 4 or len(t) == 0:
             return None
         corners = t[:, :4]
-        all_faces = np.vstack([
+        all_corners = np.vstack([
             corners[:, [0, 1, 2]],
             corners[:, [0, 1, 3]],
             corners[:, [0, 2, 3]],
             corners[:, [1, 2, 3]],
         ])
-        sorted_faces = np.sort(all_faces, axis=1)
-        uniq, counts = np.unique(sorted_faces, axis=0, return_counts=True)
-        return uniq[counts == 1].astype(np.int32)
+        
+        if t.shape[1] == 10:
+            # Full 6-node topological faces
+            all_faces = np.vstack([
+                t[:, [0, 1, 2, 4, 5, 6]],
+                t[:, [0, 1, 3, 4, 8, 7]],
+                t[:, [0, 2, 3, 6, 9, 7]],
+                t[:, [1, 2, 3, 5, 9, 8]],
+            ])
+        else:
+            all_faces = all_corners
+            
+        sorted_corners = np.sort(all_corners, axis=1)
+        uniq, indices, counts = np.unique(sorted_corners, axis=0, return_index=True, return_counts=True)
+        return all_faces[indices[counts == 1]].astype(np.int32)
 
     @staticmethod
     def _sample_points_uniform(points, n_samples):

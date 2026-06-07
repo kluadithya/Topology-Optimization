@@ -999,18 +999,26 @@ def distribute_surface_traction(nodes, face_nodes, total_force_vec):
     node_areas = np.zeros(pts.shape[0], dtype=np.float64)
     total_area = 0.0
     for face in face_nodes:
-        fn = np.asarray(face, dtype=np.int64)[:3]
+        f_raw = np.asarray(face, dtype=np.int64)
+        fn = f_raw[:3]
         v1 = pts[fn[1]] - pts[fn[0]]
         v2 = pts[fn[2]] - pts[fn[0]]
         area = 0.5 * float(np.linalg.norm(np.cross(v1, v2)))
         total_area += area
-        # Each vertex of a triangle gets 1/3 of the face area
-        for ni in fn:
-            node_areas[ni] += area / 3.0
+        
+        # Mathematical exactness for uniform pressure on quadratic (6-node) triangle:
+        # Corner nodes get 0 force. Midside nodes get 1/3 of the area each.
+        if len(f_raw) >= 6:
+            for ni in f_raw[3:6]:
+                node_areas[ni] += area / 3.0
+        else:
+            # Linear triangle: corners get 1/3 of the area each
+            for ni in fn:
+                node_areas[ni] += area / 3.0
 
     if total_area < 1e-30:
         # Fallback: equal distribution
-        unique_nodes = np.unique(np.concatenate([np.asarray(f, dtype=np.int64)[:3] for f in face_nodes]))
+        unique_nodes = np.unique(np.concatenate([np.asarray(f, dtype=np.int64) for f in face_nodes]))
         if unique_nodes.size > 0:
             f_per_node = f_total / unique_nodes.size
             for ni in unique_nodes:
