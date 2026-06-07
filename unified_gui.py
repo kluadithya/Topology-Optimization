@@ -1443,8 +1443,9 @@ class UnifiedWorkflowGUI:
                 old_mag = self._load_magnitude if abs(self._load_magnitude) > 1e-12 else None
                 self._load_magnitude = new_mag
                 if old_mag is None:
+                    mag_each = new_mag / max(1, len(self.loads))
                     for nid in list(self.loads.keys()):
-                        self.loads[nid]['mag'] = new_mag
+                        self.loads[nid]['mag'] = mag_each
                 else:
                     scale = new_mag / old_mag
                     for nid in list(self.loads.keys()):

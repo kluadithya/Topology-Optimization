@@ -419,7 +419,7 @@ class Mesh3DGenerator:
             gmsh.option.setNumber('Mesh.Algorithm3D', 1)  # Delaunay 3D
             gmsh.option.setNumber('Mesh.Optimize', 1)
             gmsh.option.setNumber('Mesh.OptimizeNetgen', 1)
-            gmsh.option.setNumber('Mesh.HighOrderOptimize', 1)
+            gmsh.option.setNumber('Mesh.HighOrderOptimize', 0)
             gmsh.option.setNumber('Mesh.Smoothing', 10)
             logger.info('  gmsh: initializing and importing STL surface ...')
 
