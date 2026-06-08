@@ -698,16 +698,29 @@ class FEASolver3D:
                     print(f'  [SOLVER] Iterative solve did not converge '
                           f'({cg_iters[0]} iters), falling back to direct.')
                     self._solver_notice_printed = True
-                # Direct fallback: use penalty method (fast for CHOLMOD/spsolve)
-                k_bc, f_bc = self._apply_bc_penalty(k.tocsc(), forces, fixed_dofs)
-                u = self._direct_solve(k_bc, f_bc)
+                
+                # Force AMG rebuild on the next iteration because the current one failed
+                self._amg_M = None
+                self._amg_base_cg_iters = None
+                
+                # Direct fallback: use extracted k_ff to reuse cached symbolic factorization
+                u_f_dir = self._direct_solve(k_ff, f_f)
+                u = np.zeros(self.n_dofs, dtype=np.float64)
+                u[free] = u_f_dir
         else:
-            # Direct path: penalty method avoids expensive submatrix extraction
-            k_bc, f_bc = self._apply_bc_penalty(k.tocsc(), forces, fixed_dofs)
+            # Direct path: use precomputed scatter map to get stable free-DOF matrix
+            free = self._free_dofs_arr if self._free_dof_map_ready else self._cached_free_dofs
+            if self._free_dof_map_ready:
+                k_ff = self._extract_free_dof_matrix(k)
+            else:
+                k_ff = k.tocsr()[free][:, free].tocsc()
+            f_f = np.asarray(forces, dtype=np.float64)[free]
             t_bc = _time.perf_counter()
-            u = self._direct_solve(k_bc, f_bc)
+            u_f = self._direct_solve(k_ff, f_f)
+            u = np.zeros(self.n_dofs, dtype=np.float64)
+            u[free] = u_f
             if not self._solver_notice_printed:
-                print('  [SOLVER] Using penalty-method BC application (no submatrix extraction).')
+                print('  [SOLVER] Using free-DOF submatrix for direct solver (cached symbolic).')
 
         t_solve = _time.perf_counter()
         if not self._solver_notice_printed:
