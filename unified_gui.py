@@ -3131,6 +3131,10 @@ class UnifiedWorkflowGUI:
             draw_cutoff = self._compute_display_cutoff(rho_clipped)
             try:
                 visible = grid.threshold(value=draw_cutoff, scalars='density')
+                if visible.n_cells > 0:
+                    surf = visible.extract_surface()
+                    surf = surf.smooth_taubin(n_iter=15, pass_band=0.1)
+                    visible = surf
             except Exception:
                 visible = grid
 

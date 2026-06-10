@@ -196,10 +196,10 @@ class ParameterMenu:
                 factor = 1.5
             self.opt_parameters['min_member_size_factor'] = max(1.0, factor)
             self.opt_parameters['min_member_projection_beta_start'] = 1.0
-            self.opt_parameters['min_member_projection_beta_end'] = 32.0
+            self.opt_parameters['min_member_projection_beta_end'] = 12.0
             # Backward-compatible single-beta field.
-            self.opt_parameters['min_member_projection_beta'] = 32.0
-            print('  [AUTO] Projection beta schedule fixed: start=1.0, end=32.0')
+            self.opt_parameters['min_member_projection_beta'] = 12.0
+            print('  [AUTO] Projection beta schedule fixed: start=1.0, end=12.0')
 
         ovh_in = input("Enable overhang self-support filter? (y/n, default n): ").strip().lower()
         self.opt_parameters['enable_overhang_filter'] = (ovh_in == 'y')
@@ -291,7 +291,7 @@ class ParameterMenu:
             self.opt_parameters['min_member_projection_beta_start'] = self._prompt(
                 "  Projection beta start", 1.0)
             self.opt_parameters['min_member_projection_beta_end'] = self._prompt(
-                "  Projection beta end", 32.0)
+                "  Projection beta end", 12.0)
             # Backward-compatible single-beta = end value
             self.opt_parameters['min_member_projection_beta'] = \
                 self.opt_parameters['min_member_projection_beta_end']
