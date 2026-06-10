@@ -428,6 +428,7 @@ class UnifiedWorkflowGUI:
 
             # Suggest volume fraction based on absolute Yield Limits and stress utilization
             if util >= 100.0:
+                suggest_vf = 1.0
                 suggest_vf_str = '1.00 (WARNING: Fails yield limit)'
                 vf_note = '(Solid structure is yielding, no material removal suggested)'
             elif util > 80.0:
