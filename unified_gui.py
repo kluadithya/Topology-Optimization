@@ -428,21 +428,29 @@ class UnifiedWorkflowGUI:
                 max_disp = float(np.max(disp_mag))
                 disp_info = f'\nMax displacement: {max_disp:.3e} mm'
 
+            # Calculate protected/passive mask
+            mask = self._passive_solid_mask if self._passive_solid_mask is not None else np.zeros(len(vm), dtype=bool)
+            active_mask = ~mask
+            n_total = max(len(vm), 1)
+            passive_frac = float(np.sum(mask)) / n_total
+
             # Suggest volume fraction based on absolute Yield Limits and stress utilization
             if util >= 100.0:
                 suggest_vf = 1.0
                 suggest_vf_str = '1.00 (WARNING: Fails yield limit)'
                 vf_note = '(Solid structure is yielding, no material removal suggested)'
-            elif util > 80.0:
-                low_stress_frac = float(np.sum(vm < 0.20 * allowable)) / max(len(vm), 1)
-                suggest_vf = float(np.clip(1.0 - low_stress_frac * 0.5, 0.70, 0.95))
-                suggest_vf_str = f'~{suggest_vf:.2f}'
-                vf_note = f'(~{low_stress_frac*100:.0f}% elements <20% allowable. High utilization)'
             else:
-                low_stress_frac = float(np.sum(vm < 0.20 * allowable)) / max(len(vm), 1)
-                suggest_vf = float(np.clip(1.0 - low_stress_frac * 0.8, 0.15, 0.85))
-                suggest_vf_str = f'~{suggest_vf:.2f}'
-                vf_note = f'(~{low_stress_frac*100:.0f}% elements <20% allowable)'
+                active_low_stress_count = np.sum((vm < 0.20 * allowable) & active_mask)
+                if util > 80.0:
+                    remove_frac = float(active_low_stress_count) / n_total * 0.5
+                    suggest_vf = float(np.clip(1.0 - remove_frac, passive_frac + 0.05, 0.95))
+                    suggest_vf_str = f'~{suggest_vf:.2f}'
+                    vf_note = f'(~{(active_low_stress_count/n_total)*100:.0f}% removable elements <20% allowable. High util)'
+                else:
+                    remove_frac = float(active_low_stress_count) / n_total * 0.8
+                    suggest_vf = float(np.clip(1.0 - remove_frac, passive_frac + 0.05, 0.95))
+                    suggest_vf_str = f'~{suggest_vf:.2f}'
+                    vf_note = f'(~{(active_low_stress_count/n_total)*100:.0f}% removable elements <20% allowable)'
 
             info = (
                 f'STATIC STRESS ANALYSIS\n'
