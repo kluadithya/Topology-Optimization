@@ -1524,6 +1524,8 @@ class UnifiedWorkflowGUI:
                 self._update_overlays()
             elif kind == 'dist_cancel':
                 print('  [BC] Distance input cancelled')
+            elif kind == 'new_mask':
+                self._draw_non_design_mask(val)
             elif kind == 'vf' and val is not None:
                 raw_str = str(val).strip()
                 obj = str(self.config.get('objective_function', 'stiffness')).lower()
@@ -2854,9 +2856,16 @@ class UnifiedWorkflowGUI:
                     continue
 
         if self._stage == self.STAGE_BC:
-            self._draw_non_design_mask()
+            self._request_non_design_mask_update()
 
-    def _draw_non_design_mask(self):
+    def _request_non_design_mask_update(self):
+        def worker():
+            mask = self._build_passive_solid_mask()
+            self._input_queue.put(('new_mask', mask))
+        t = threading.Thread(target=worker, daemon=True)
+        t.start()
+
+    def _draw_non_design_mask(self, mask=None):
         if self._plotter is None:
             return
         try:
@@ -2870,7 +2879,8 @@ class UnifiedWorkflowGUI:
         if n_per not in (4, 10):
             return
 
-        mask = self._build_passive_solid_mask()
+        if mask is None:
+            mask = self._build_passive_solid_mask()
         self._passive_solid_mask = mask.copy() if mask is not None else None
         if mask is None or not np.any(mask):
             return
