@@ -205,6 +205,8 @@ class UnifiedWorkflowGUI:
             p.add_key_event(key, lambda: self._key_Q())
         for key in ('f', 'F'):
             p.add_key_event(key, lambda: self._key_F())
+        for key in ('d', 'D'):
+            p.add_key_event(key, lambda: self._key_D())
 
         for key in ('p', 'P'):
             p.add_key_event(key, lambda: self._key_pick_scope('NODE'))
@@ -1440,6 +1442,27 @@ class UnifiedWorkflowGUI:
         t = threading.Thread(target=self._read_magnitude_input, daemon=True)
         t.start()
 
+    def _key_D(self):
+        if self._stage != self.STAGE_BC:
+            return
+        if self._awaiting_input:
+            return
+        self._awaiting_input = True
+        print('\n  [INPUT AWAITING IN TERMINAL]')
+        t = threading.Thread(target=self._read_distance_input, daemon=True)
+        t.start()
+
+    def _read_distance_input(self):
+        try:
+            mode_str = 'SUPPORTS' if self._bc_mode == 'SUPPORTS' else 'LOADS'
+            raw = input(f'  Enter protection distance for {mode_str} [mm]: ').strip()
+            if raw:
+                self._input_queue.put(('dist', (self._bc_mode, float(raw))))
+            else:
+                self._input_queue.put(('dist_cancel', None))
+        except (ValueError, KeyboardInterrupt):
+            self._input_queue.put(('dist_cancel', None))
+
     def _read_magnitude_input(self):
         try:
             raw = input('  Enter load magnitude [N] (signed, e.g. -1000): ').strip()
@@ -1490,6 +1513,17 @@ class UnifiedWorkflowGUI:
                 self._update_overlays()
             elif kind == 'mag_cancel':
                 print('  [LOAD] Magnitude input cancelled')
+            elif kind == 'dist' and val is not None:
+                mode, new_dist = val
+                if mode == 'SUPPORTS':
+                    self.config['support_non_design_distance_mm'] = new_dist
+                else:
+                    self.config['force_non_design_distance_mm'] = new_dist
+                print(f'  [{mode}] Protection distance set -> {new_dist:.2f} mm')
+                self._redraw_bc_indicators()
+                self._update_overlays()
+            elif kind == 'dist_cancel':
+                print('  [BC] Distance input cancelled')
             elif kind == 'vf' and val is not None:
                 raw_str = str(val).strip()
                 obj = str(self.config.get('objective_function', 'stiffness')).lower()
@@ -1642,6 +1676,7 @@ class UnifiedWorkflowGUI:
                 'P=Node  G=Face  E=Edge pick\n'
                 'Supports lock translations in X,Y,Z\n'
                 'X/Y/Z=Load dir  V=Set magnitude  M=Flip sign  +/- = scale\n'
+                'D=Set protect distance\n'
                 'N=Accept & Stress Analysis  B=Back to Mesh Review\n'
                 'Q=Quit  F=Fit  1-7=Views  Click=Pick')
         if self._stage == self.STAGE_STRESS:
@@ -2817,6 +2852,9 @@ class UnifiedWorkflowGUI:
                     self._indicator_actors.append(a2)
                 except Exception:
                     continue
+
+        if self._stage == self.STAGE_BC:
+            self._draw_non_design_mask()
 
     def _draw_non_design_mask(self):
         if self._plotter is None:
