@@ -111,6 +111,7 @@ class UnifiedWorkflowGUI:
         self._density_actor = None
         self._scalar_bar_actor = None
         self._mask_actor = None
+        self._mask_status_actor = None
 
         # Stress analysis stage state
         self._stress_vm_all = None          # per-element von Mises stress
@@ -2867,6 +2868,14 @@ class UnifiedWorkflowGUI:
             self._request_non_design_mask_update()
 
     def _request_non_design_mask_update(self):
+        if getattr(self, '_plotter', None) is not None:
+            if getattr(self, '_mask_status_actor', None) is not None:
+                try:
+                    self._plotter.remove_actor(self._mask_status_actor)
+                except Exception:
+                    pass
+            self._mask_status_actor = self._plotter.add_text("Computing Protection Mask...", position='lower_right', color='yellow', font_size=12)
+
         def worker():
             mask = self._build_passive_solid_mask()
             self._input_queue.put(('new_mask', mask))
@@ -2876,6 +2885,14 @@ class UnifiedWorkflowGUI:
     def _draw_non_design_mask(self, mask=None):
         if self._plotter is None:
             return
+
+        if getattr(self, '_mask_status_actor', None) is not None:
+            try:
+                self._plotter.remove_actor(self._mask_status_actor)
+            except Exception:
+                pass
+            self._mask_status_actor = None
+
         try:
             if self._mask_actor is not None:
                 self._plotter.remove_actor(self._mask_actor)
