@@ -163,13 +163,21 @@ class ParameterMenu:
 
         # ── Manufacturability (standard prompts) ────────────────────────
         print("\nManufacturability:")
-        nd_dist_in = input("Protect support/load region distance [mm] (>=0, default 1.0): ").strip()
+        supp_dist_in = input("Protect support region distance [mm] (>=0, default 1.0): ").strip()
         try:
-            nd_dist_mm = float(nd_dist_in) if nd_dist_in else 1.0
+            supp_dist_mm = float(supp_dist_in) if supp_dist_in else 1.0
         except Exception:
-            nd_dist_mm = 1.0
-        self.opt_parameters['non_design_distance_mm'] = max(0.0, nd_dist_mm)
-        self.opt_parameters['non_design_node_layers'] = max(1, int(self.opt_parameters['non_design_distance_mm'] + 0.999999))
+            supp_dist_mm = 1.0
+        self.opt_parameters['support_non_design_distance_mm'] = max(0.0, supp_dist_mm)
+        self.opt_parameters['support_non_design_node_layers'] = max(1, int(self.opt_parameters['support_non_design_distance_mm'] + 0.999999))
+
+        force_dist_in = input("Protect load region distance [mm] (>=0, default 1.0): ").strip()
+        try:
+            force_dist_mm = float(force_dist_in) if force_dist_in else 1.0
+        except Exception:
+            force_dist_mm = 1.0
+        self.opt_parameters['force_non_design_distance_mm'] = max(0.0, force_dist_mm)
+        self.opt_parameters['force_non_design_node_layers'] = max(1, int(self.opt_parameters['force_non_design_distance_mm'] + 0.999999))
 
         min_mm_in = input("Minimum member size in model units (optional, Enter to skip): ").strip()
         if min_mm_in:
@@ -455,7 +463,8 @@ class ParameterMenu:
             print(f"Threshold: {self.opt_parameters.get('threshold', 0.5)} (manual)")
         else:
             print("Threshold: Auto (derived from target volume/weight)")
-        print(f"Protected support/load distance [mm]: {self.opt_parameters.get('non_design_distance_mm', 1.0):.2f}")
+        print(f"Protected support distance [mm]: {self.opt_parameters.get('support_non_design_distance_mm', 1.0):.2f}")
+        print(f"Protected load distance [mm]: {self.opt_parameters.get('force_non_design_distance_mm', 1.0):.2f}")
 
         if settings_mode == 'advanced':
             print(f"Penalization: {self.opt_parameters.get('penalization', 3.0)}")

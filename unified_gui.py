@@ -1891,7 +1891,7 @@ class UnifiedWorkflowGUI:
 
         return fixed_dofs, forces
     def _build_passive_solid_mask(self):
-        """Create a non-design solid mask around support/load selections."""
+        """Create a non-design solid mask around support and load selections."""
         elems = np.asarray(self._original_elements, dtype=np.int64)
         if elems.ndim != 2 or elems.shape[0] == 0:
             return None
@@ -1905,211 +1905,208 @@ class UnifiedWorkflowGUI:
         centroids = np.mean(nodes[corners], axis=1)
         elem_radius = np.max(np.linalg.norm(nodes[corners] - centroids[:, None, :], axis=2), axis=1)
 
-        # Collect protected nodes and selected faces.
-        protected_nodes = set(int(n) for n in self.fixed_nodes)
-        protected_nodes.update(int(n) for n in self.loads.keys())
-        faces = self._get_display_faces()
-        face_indices = set()
-        if faces is not None and len(faces) > 0:
-            if self._support_face_indices:
-                face_indices.update(int(i) for i in self._support_face_indices)
-            if self._load_face_indices:
-                face_indices.update(int(i) for i in self._load_face_indices)
+        def _build_region_mask(region_nodes, region_face_indices, distance_mm, node_layers):
+            protected_nodes = set(int(n) for n in region_nodes)
+            faces = self._get_display_faces()
+            face_indices = set()
+            if faces is not None and len(faces) > 0 and region_face_indices:
+                face_indices.update(int(i) for i in region_face_indices)
 
-        face_indices = [i for i in face_indices if 0 <= int(i) < (faces.shape[0] if faces is not None else 0)]
-        selected_tris = None
-        if faces is not None and len(face_indices) > 0:
-            selected_tris = np.asarray(faces[np.asarray(face_indices, dtype=np.int64)], dtype=np.int64)
-            protected_nodes.update(int(n) for n in selected_tris.reshape(-1).tolist())
+            face_indices = [i for i in face_indices if 0 <= int(i) < (faces.shape[0] if faces is not None else 0)]
+            selected_tris = None
+            if faces is not None and len(face_indices) > 0:
+                selected_tris = np.asarray(faces[np.asarray(face_indices, dtype=np.int64)], dtype=np.int64)
+                protected_nodes.update(int(n) for n in selected_tris.reshape(-1).tolist())
 
-        # Base touch mask: any element that uses protected nodes.
-        protected_nodes = sorted(int(n) for n in protected_nodes if 0 <= int(n) < nodes.shape[0])
-        touch_mask = np.any(np.isin(corners, np.asarray(protected_nodes, dtype=np.int64)), axis=1) if protected_nodes else np.zeros(n_elem, dtype=bool)
+            protected_nodes = sorted(int(n) for n in protected_nodes if 0 <= int(n) < nodes.shape[0])
+            touch_mask = np.any(np.isin(corners, np.asarray(protected_nodes, dtype=np.int64)), axis=1) if protected_nodes else np.zeros(n_elem, dtype=bool)
 
-        # Always protect elements directly touching the selected face triangles.
-        if selected_tris is not None and selected_tris.size > 0:
-            face_nodes = np.unique(selected_tris.reshape(-1))
-            touch_mask |= np.any(np.isin(corners, face_nodes), axis=1)
+            if selected_tris is not None and selected_tris.size > 0:
+                face_nodes = np.unique(selected_tris.reshape(-1))
+                touch_mask |= np.any(np.isin(corners, face_nodes), axis=1)
 
-        distance_mm = float(self.config.get('non_design_distance_mm', 0.0))
-        effective_distance = float(distance_mm)
+            effective_distance = float(distance_mm)
 
-        # If faces are selected and user distance is zero, infer a thin shell from face size.
-        if (effective_distance <= 0.0) and (selected_tris is not None and selected_tris.size > 0):
-            tri_pts = nodes[np.asarray(selected_tris, dtype=np.int64)]
-            e01 = np.linalg.norm(tri_pts[:, 1, :] - tri_pts[:, 0, :], axis=1)
-            e12 = np.linalg.norm(tri_pts[:, 2, :] - tri_pts[:, 1, :], axis=1)
-            e20 = np.linalg.norm(tri_pts[:, 0, :] - tri_pts[:, 2, :], axis=1)
-            edge_ref = float(np.median(np.hstack([e01, e12, e20]))) if tri_pts.shape[0] > 0 else 0.0
-            if np.isfinite(edge_ref) and edge_ref > 0.0:
-                effective_distance = max(0.35 * edge_ref, 1e-9)
+            if (effective_distance <= 0.0) and (selected_tris is not None and selected_tris.size > 0):
+                tri_pts = nodes[np.asarray(selected_tris, dtype=np.int64)]
+                e01 = np.linalg.norm(tri_pts[:, 1, :] - tri_pts[:, 0, :], axis=1)
+                e12 = np.linalg.norm(tri_pts[:, 2, :] - tri_pts[:, 1, :], axis=1)
+                e20 = np.linalg.norm(tri_pts[:, 0, :] - tri_pts[:, 2, :], axis=1)
+                edge_ref = float(np.median(np.hstack([e01, e12, e20]))) if tri_pts.shape[0] > 0 else 0.0
+                if np.isfinite(edge_ref) and edge_ref > 0.0:
+                    effective_distance = max(0.35 * edge_ref, 1e-9)
 
-        # If we have face selections, build a uniform-thickness shell around those faces.
-        if selected_tris is not None and selected_tris.size > 0 and effective_distance > 0.0:
-            tri_pts = nodes[np.asarray(selected_tris, dtype=np.int64)]
-            tri_centers = np.mean(tri_pts, axis=1)
-            tri_edge_max = np.max(np.linalg.norm(tri_pts[:, 1, :] - tri_pts[:, 0, :], axis=1)) if tri_pts.shape[0] > 0 else 0.0
-            search_pad = float(effective_distance + tri_edge_max)
+            if selected_tris is not None and selected_tris.size > 0 and effective_distance > 0.0:
+                tri_pts = nodes[np.asarray(selected_tris, dtype=np.int64)]
+                tri_centers = np.mean(tri_pts, axis=1)
+                tri_edge_max = np.max(np.linalg.norm(tri_pts[:, 1, :] - tri_pts[:, 0, :], axis=1)) if tri_pts.shape[0] > 0 else 0.0
+                search_pad = float(effective_distance + tri_edge_max)
 
-            try:
-                from scipy.spatial import cKDTree
-                tree = cKDTree(tri_centers)
-            except Exception:
-                tree = None
+                try:
+                    from scipy.spatial import cKDTree
+                    tree = cKDTree(tri_centers)
+                except Exception:
+                    tree = None
 
-            def _pt_tri_dist2(p, a, b, c):
-                ab = b - a
-                ac = c - a
-                ap = p - a
-                d1 = float(np.dot(ab, ap))
-                d2 = float(np.dot(ac, ap))
-                if d1 <= 0.0 and d2 <= 0.0:
-                    return float(np.dot(ap, ap))
-                bp = p - b
-                d3 = float(np.dot(ab, bp))
-                d4 = float(np.dot(ac, bp))
-                if d3 >= 0.0 and d4 <= d3:
-                    return float(np.dot(bp, bp))
-                vc = d1 * d4 - d3 * d2
-                if vc <= 0.0 and d1 >= 0.0 and d3 <= 0.0:
-                    v = d1 / (d1 - d3)
-                    proj = a + v * ab
+                def _pt_tri_dist2(p, a, b, c):
+                    ab = b - a
+                    ac = c - a
+                    ap = p - a
+                    d1 = float(np.dot(ab, ap))
+                    d2 = float(np.dot(ac, ap))
+                    if d1 <= 0.0 and d2 <= 0.0:
+                        return float(np.dot(ap, ap))
+                    bp = p - b
+                    d3 = float(np.dot(ab, bp))
+                    d4 = float(np.dot(ac, bp))
+                    if d3 >= 0.0 and d4 <= d3:
+                        return float(np.dot(bp, bp))
+                    vc = d1 * d4 - d3 * d2
+                    if vc <= 0.0 and d1 >= 0.0 and d3 <= 0.0:
+                        v = d1 / (d1 - d3)
+                        proj = a + v * ab
+                        dp = p - proj
+                        return float(np.dot(dp, dp))
+                    cp = p - c
+                    d5 = float(np.dot(ab, cp))
+                    d6 = float(np.dot(ac, cp))
+                    if d6 >= 0.0 and d5 <= d6:
+                        return float(np.dot(cp, cp))
+                    vb = d5 * d2 - d1 * d6
+                    if vb <= 0.0 and d2 >= 0.0 and d6 <= 0.0:
+                        w = d2 / (d2 - d6)
+                        proj = a + w * ac
+                        dp = p - proj
+                        return float(np.dot(dp, dp))
+                    va = d3 * d6 - d5 * d4
+                    if va <= 0.0 and (d4 - d3) >= 0.0 and (d5 - d6) >= 0.0:
+                        w = (d4 - d3) / ((d4 - d3) + (d5 - d6))
+                        proj = b + w * (c - b)
+                        dp = p - proj
+                        return float(np.dot(dp, dp))
+                    denom = 1.0 / max(va + vb + vc, 1e-12)
+                    v = vb * denom
+                    w = vc * denom
+                    proj = a + ab * v + ac * w
                     dp = p - proj
                     return float(np.dot(dp, dp))
-                cp = p - c
-                d5 = float(np.dot(ab, cp))
-                d6 = float(np.dot(ac, cp))
-                if d6 >= 0.0 and d5 <= d6:
-                    return float(np.dot(cp, cp))
-                vb = d5 * d2 - d1 * d6
-                if vb <= 0.0 and d2 >= 0.0 and d6 <= 0.0:
-                    w = d2 / (d2 - d6)
-                    proj = a + w * ac
-                    dp = p - proj
-                    return float(np.dot(dp, dp))
-                va = d3 * d6 - d5 * d4
-                if va <= 0.0 and (d4 - d3) >= 0.0 and (d5 - d6) >= 0.0:
-                    w = (d4 - d3) / ((d4 - d3) + (d5 - d6))
-                    proj = b + w * (c - b)
-                    dp = p - proj
-                    return float(np.dot(dp, dp))
-                denom = 1.0 / max(va + vb + vc, 1e-12)
-                v = vb * denom
-                w = vc * denom
-                proj = a + ab * v + ac * w
-                dp = p - proj
-                return float(np.dot(dp, dp))
 
-            mask = np.zeros(n_elem, dtype=bool)
-            for i in range(n_elem):
-                nodes_i = nodes[corners[i]]
-                hit = False
-                for p in nodes_i:
-                    if tree is not None:
-                        cand = tree.query_ball_point(p, effective_distance + search_pad)
-                    else:
-                        diff = tri_centers - p.reshape(1, 3)
-                        cand = np.where(np.sum(diff * diff, axis=1) <= (effective_distance + search_pad) ** 2)[0].tolist()
-                    for j in cand:
-                        a, b, c = tri_pts[int(j)]
-                        if _pt_tri_dist2(p, a, b, c) <= (effective_distance ** 2):
-                            hit = True
+                mask = np.zeros(n_elem, dtype=bool)
+                for i in range(n_elem):
+                    nodes_i = nodes[corners[i]]
+                    hit = False
+                    for p in nodes_i:
+                        if tree is not None:
+                            cand = tree.query_ball_point(p, effective_distance + search_pad)
+                        else:
+                            diff = tri_centers - p.reshape(1, 3)
+                            cand = np.where(np.sum(diff * diff, axis=1) <= (effective_distance + search_pad) ** 2)[0].tolist()
+                        for j in cand:
+                            a, b, c = tri_pts[int(j)]
+                            if _pt_tri_dist2(p, a, b, c) <= (effective_distance ** 2):
+                                hit = True
+                                break
+                        if hit:
                             break
                     if hit:
-                        break
-                if hit:
-                    mask[i] = True
+                        mask[i] = True
 
-            # Layer-based expansion to guarantee uniform thickness in element layers.
-            try:
-                edge_ref = None
-                if tri_pts.shape[0] > 0:
-                    e01 = np.linalg.norm(tri_pts[:, 1, :] - tri_pts[:, 0, :], axis=1)
-                    e12 = np.linalg.norm(tri_pts[:, 2, :] - tri_pts[:, 1, :], axis=1)
-                    e20 = np.linalg.norm(tri_pts[:, 0, :] - tri_pts[:, 2, :], axis=1)
-                    edge_ref = float(np.median(np.hstack([e01, e12, e20])))
-                if edge_ref is not None and edge_ref > 1e-12:
-                    layers = int(max(1, np.ceil(effective_distance / edge_ref)))
-                    n_nodes = int(nodes.shape[0])
-                    node_to_elems = [[] for _ in range(n_nodes)]
-                    for eidx in range(n_elem):
-                        for nid in elems[eidx]:
-                            ni = int(nid)
-                            if 0 <= ni < n_nodes:
-                                node_to_elems[ni].append(eidx)
-                    seed_elems = set()
-                    seed_nodes = set(int(n) for n in selected_tris.reshape(-1).tolist())
-                    for nid in seed_nodes:
-                        if 0 <= nid < n_nodes:
-                            seed_elems.update(node_to_elems[nid])
-                    expanded = set(seed_elems)
-                    frontier = set(seed_elems)
-                    for _ in range(layers):
-                        next_frontier = set()
-                        for eidx in frontier:
-                            for nid in elems[int(eidx)]:
-                                for j in node_to_elems[int(nid)]:
-                                    if j not in expanded:
-                                        next_frontier.add(j)
-                        expanded.update(next_frontier)
-                        frontier = next_frontier
-                    if expanded:
-                        mask[np.fromiter(expanded, dtype=np.int64)] = True
-            except Exception:
-                pass
-
-            mask |= touch_mask
-            return mask
-
-        # Fallback: node-based distance shell if no face region is selected.
-        if effective_distance > 0.0 and protected_nodes:
-            protected_pts = nodes[np.asarray(protected_nodes, dtype=np.int64)]
-            try:
-                from scipy.spatial import cKDTree
-                tree = cKDTree(protected_pts)
                 try:
-                    d_cent, _ = tree.query(centroids, k=1, workers=-1)
-                except TypeError:
-                    d_cent, _ = tree.query(centroids, k=1)
-                d_cent = np.asarray(d_cent, dtype=np.float64)
-                mask = d_cent <= (effective_distance + elem_radius)
-            except Exception:
-                diff_c = centroids[:, None, :] - protected_pts[None, :, :]
-                d2 = np.sum(diff_c * diff_c, axis=2)
-                d_cent = np.sqrt(np.min(d2, axis=1))
-                mask = d_cent <= (effective_distance + elem_radius)
-            mask |= touch_mask
+                    edge_ref = None
+                    if tri_pts.shape[0] > 0:
+                        e01 = np.linalg.norm(tri_pts[:, 1, :] - tri_pts[:, 0, :], axis=1)
+                        e12 = np.linalg.norm(tri_pts[:, 2, :] - tri_pts[:, 1, :], axis=1)
+                        e20 = np.linalg.norm(tri_pts[:, 0, :] - tri_pts[:, 2, :], axis=1)
+                        edge_ref = float(np.median(np.hstack([e01, e12, e20])))
+                    if edge_ref is not None and edge_ref > 1e-12:
+                        layers = int(max(1, np.ceil(effective_distance / edge_ref)))
+                        n_nodes_total = int(nodes.shape[0])
+                        node_to_elems = [[] for _ in range(n_nodes_total)]
+                        for eidx in range(n_elem):
+                            for nid in elems[eidx]:
+                                ni = int(nid)
+                                if 0 <= ni < n_nodes_total:
+                                    node_to_elems[ni].append(eidx)
+                        seed_elems = set()
+                        seed_nodes = set(int(n) for n in selected_tris.reshape(-1).tolist())
+                        for nid in seed_nodes:
+                            if 0 <= nid < n_nodes_total:
+                                seed_elems.update(node_to_elems[nid])
+                        expanded = set(seed_elems)
+                        frontier = set(seed_elems)
+                        for _ in range(layers):
+                            next_frontier = set()
+                            for eidx in frontier:
+                                for nid in elems[int(eidx)]:
+                                    for j in node_to_elems[int(nid)]:
+                                        if j not in expanded:
+                                            next_frontier.add(j)
+                            expanded.update(next_frontier)
+                            frontier = next_frontier
+                        if expanded:
+                            mask[np.fromiter(expanded, dtype=np.int64)] = True
+                except Exception:
+                    pass
+
+                mask |= touch_mask
+                return mask
+
+            if effective_distance > 0.0 and protected_nodes:
+                protected_pts = nodes[np.asarray(protected_nodes, dtype=np.int64)]
+                try:
+                    from scipy.spatial import cKDTree
+                    tree = cKDTree(protected_pts)
+                    try:
+                        d_cent, _ = tree.query(centroids, k=1, workers=-1)
+                    except TypeError:
+                        d_cent, _ = tree.query(centroids, k=1)
+                    d_cent = np.asarray(d_cent, dtype=np.float64)
+                    mask = d_cent <= (effective_distance + elem_radius)
+                except Exception:
+                    diff_c = centroids[:, None, :] - protected_pts[None, :, :]
+                    d2 = np.sum(diff_c * diff_c, axis=2)
+                    d_cent = np.sqrt(np.min(d2, axis=1))
+                    mask = d_cent <= (effective_distance + elem_radius)
+                mask |= touch_mask
+                return mask
+
+            n_nodes_total = int(nodes.shape[0])
+            node_to_elems = [[] for _ in range(n_nodes_total)]
+            for eidx in range(n_elem):
+                for nid in elems[eidx]:
+                    ni = int(nid)
+                    if 0 <= ni < n_nodes_total:
+                        node_to_elems[ni].append(eidx)
+
+            protected_nodes_curr = set(int(n) for n in protected_nodes)
+            protected_elems = set()
+            for _ in range(node_layers):
+                frontier_elems = set()
+                for nid in protected_nodes_curr:
+                    frontier_elems.update(node_to_elems[nid])
+                protected_elems.update(frontier_elems)
+                next_nodes = set(protected_nodes_curr)
+                for eidx in frontier_elems:
+                    for nid in elems[int(eidx)]:
+                        ni = int(nid)
+                        if 0 <= ni < n_nodes_total:
+                            next_nodes.add(ni)
+                protected_nodes_curr = next_nodes
+
+            mask = np.zeros(n_elem, dtype=bool)
+            if protected_elems:
+                mask[np.fromiter(protected_elems, dtype=np.int64)] = True
             return mask
 
-        # Final fallback: node layers expansion.
-        node_layers = int(max(1, self.config.get('non_design_node_layers', 1)))
-        n_nodes = int(nodes.shape[0])
-        node_to_elems = [[] for _ in range(n_nodes)]
-        for eidx in range(n_elem):
-            for nid in elems[eidx]:
-                ni = int(nid)
-                if 0 <= ni < n_nodes:
-                    node_to_elems[ni].append(eidx)
-
-        protected_nodes_curr = set(int(n) for n in protected_nodes)
-        protected_elems = set()
-        for _ in range(node_layers):
-            frontier_elems = set()
-            for nid in protected_nodes_curr:
-                frontier_elems.update(node_to_elems[nid])
-            protected_elems.update(frontier_elems)
-            next_nodes = set(protected_nodes_curr)
-            for eidx in frontier_elems:
-                for nid in elems[int(eidx)]:
-                    ni = int(nid)
-                    if 0 <= ni < n_nodes:
-                        next_nodes.add(ni)
-            protected_nodes_curr = next_nodes
-
-        mask = np.zeros(n_elem, dtype=bool)
-        if protected_elems:
-            mask[np.fromiter(protected_elems, dtype=np.int64)] = True
-        return mask
+        support_dist = float(self.config.get('support_non_design_distance_mm', self.config.get('non_design_distance_mm', 0.0)))
+        support_layers = int(max(1, self.config.get('support_non_design_node_layers', self.config.get('non_design_node_layers', 1))))
+        support_mask = _build_region_mask(self.fixed_nodes, self._support_face_indices, support_dist, support_layers)
+        
+        force_dist = float(self.config.get('force_non_design_distance_mm', self.config.get('non_design_distance_mm', 0.0)))
+        force_layers = int(max(1, self.config.get('force_non_design_node_layers', self.config.get('non_design_node_layers', 1))))
+        force_mask = _build_region_mask(self.loads.keys(), self._load_face_indices, force_dist, force_layers)
+        
+        return support_mask | force_mask
 
     def _enforce_manufacturable_result(self, rho):
         """Keep only load-path-connected solid material and remove floating islands."""
@@ -2948,8 +2945,9 @@ class UnifiedWorkflowGUI:
                 target_vf = float(np.clip(cfg_opt.get('volume_fraction', cfg_opt.get('volfrac', 0.5)), 0.05, 1.0))
                 max_reduction = 100.0 * max(0.0, 1.0 - passive_frac)
                 print(f'  [OPT] Non-design solid region enforced: {n_passive}/{n_total} elements ({passive_frac:.4f})')
-                nd_dist = float(self.config.get('non_design_distance_mm', 0.0))
-                print(f'  [OPT] BC summary: supports={len(self.fixed_nodes)}, loads={len(self.loads)}, support_faces={len(self._support_face_indices)}, load_faces={len(self._load_face_indices)}, distance_mm={nd_dist:.3f}')
+                s_dist = float(self.config.get('support_non_design_distance_mm', self.config.get('non_design_distance_mm', 0.0)))
+                f_dist = float(self.config.get('force_non_design_distance_mm', self.config.get('non_design_distance_mm', 0.0)))
+                print(f'  [OPT] BC summary: supports={len(self.fixed_nodes)}, loads={len(self.loads)}, support_faces={len(self._support_face_indices)}, load_faces={len(self._load_face_indices)}, supp_dist_mm={s_dist:.3f}, force_dist_mm={f_dist:.3f}')
                 if passive_frac > target_vf + 1e-9:
                     print(f'  [OPT][WARN] Target volume fraction {target_vf:.4f} is below protected fraction {passive_frac:.4f}.')
                     print(f'  [OPT][WARN] Current setup can remove at most {max_reduction:.2f}% material unless protected region is reduced.')
