@@ -75,7 +75,7 @@ class FEASolver3D:
         self._amg_M = None               # Cached preconditioner LinearOperator
         self._amg_base_cg_iters = None   # CG iterations on first use (baseline)
         self._amg_rebuild_counter = 0    # Iterations since last AMG rebuild
-        self._amg_rebuild_interval = 25  # Rebuild every N iterations as safety net
+        self._amg_rebuild_interval = 3  # Rebuild every N iterations as safety net
         self._amg_nullspace = None       # Near-nullspace vectors for 3D elasticity
 
         # Precompute Gauss-point B-matrices for Tet10 (§3.4)
