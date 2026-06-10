@@ -2874,7 +2874,7 @@ class UnifiedWorkflowGUI:
                     self._plotter.remove_actor(self._mask_status_actor)
                 except Exception:
                     pass
-            self._mask_status_actor = self._plotter.add_text("Computing Protection Mask...", position='lower_right', color='yellow', font_size=12)
+            self._mask_status_actor = self._plotter.add_text("Computing Protection Mask...", position='upper_right', color='yellow', font_size=12)
 
         def worker():
             mask = self._build_passive_solid_mask()
