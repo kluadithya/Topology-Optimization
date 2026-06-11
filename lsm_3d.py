@@ -391,33 +391,27 @@ class LSM3DOptimizer:
             self._grad_neighbors.append(nbrs)
             self._grad_pinv.append(pinv)
 
-    def _compute_gradient(self, field):
-        """Compute gradient of a scalar field using precomputed least-squares operators.
-
-        Parameters
-        ----------
-        field : ndarray (n_elements,)
-            Scalar field values at element centroids.
-
-        Returns
-        -------
-        grad : ndarray (n_elements, 3)
-            Gradient vector at each element centroid.
-        """
+    def _compute_gradient(self, field, band=None):
+        """Compute gradient of a scalar field using precomputed least-squares operators."""
         field = np.asarray(field, dtype=np.float64)
         grad = np.zeros((self.n_elements, 3), dtype=np.float64)
 
-        for i in range(self.n_elements):
+        if band is None:
+            indices = range(self.n_elements)
+        else:
+            indices = np.where(band)[0]
+
+        for i in indices:
             nbrs = self._grad_neighbors[i]
             if len(nbrs) == 0:
                 continue
             dphi = field[nbrs] - field[i]  # (n_nbr,)
-            grad[i] = self._grad_pinv[i] @ dphi  # (3, n_nbr) @ (n_nbr,) â†’ (3,)
+            grad[i] = self._grad_pinv[i] @ dphi  # (3, n_nbr) @ (n_nbr,) -> (3,)
 
         return grad
 
     def _compute_gradient_magnitude(self, field):
-        """Compute |âˆ‡field| at each element centroid."""
+        """Compute |∇field| at each element centroid."""
         grad = self._compute_gradient(field)
         return np.sqrt(np.sum(grad ** 2, axis=1))
 
@@ -445,7 +439,7 @@ class LSM3DOptimizer:
             self.phi = (1.0 - lam) * self.phi + lam * avg
             self._enforce_passive_on_phi()
 
-    # â”€â”€ Hamilton-Jacobi PDE evolution â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # ——— Hamilton-Jacobi PDE evolution ——————————————————————————————————
 
     def _shape_derivative_velocity(self, u, rho):
         """Compute shape derivative velocity field.
@@ -474,22 +468,24 @@ class LSM3DOptimizer:
     def _upwind_hj_update(self, velocity):
         """Solve Hamilton-Jacobi PDE: dphi/dt + V_n * |grad_phi| = 0.
 
-        Uses first-order upwind scheme on unstructured mesh.
-        The gradient magnitude |âˆ‡Ï†| is computed via least-squares reconstruction
-        and the update is: phi_new = phi - dt * V_n * |grad_phi|.
-
-        CFL condition is enforced for stability.
+        Uses first-order upwind scheme on unstructured mesh restricted to a Narrow Band
+        around the structural interface for massive computational savings.
         """
-        # Compute gradient of phi
-        grad_phi = self._compute_gradient(self.phi)
+        # Define narrow band: 3x filter radius around zero-level set
+        band_width = max(3.0 * self.filter_radius, 1e-6)
+        band = np.abs(self.phi) <= band_width
+        if not np.any(band):
+            band = np.ones(self.n_elements, dtype=bool)
+
+        # Compute gradient only within the narrow band
+        grad_phi = self._compute_gradient(self.phi, band=band)
         grad_mag = np.sqrt(np.sum(grad_phi ** 2, axis=1))
 
-        # For upwind stability: use gradient magnitude but ensure it's not
-        # degenerate away from the interface
+        # For upwind stability
         grad_mag_safe = np.maximum(grad_mag, 1e-12)
 
-        # CFL-limited time step
-        max_vel = float(np.max(np.abs(velocity)))
+        # CFL-limited time step based on max velocity IN the band
+        max_vel = float(np.max(np.abs(velocity[band])))
         if max_vel < 1e-30:
             return
 

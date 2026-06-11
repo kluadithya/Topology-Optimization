@@ -102,6 +102,7 @@ class MoriTanaka3DOptimizer:
 
         self.centroids = np.mean(self.fea.nodes[self.fea.elements], axis=1)
         self._build_filter_map()
+        self._build_mt_lut()
 
         elems = np.asarray(self.fea.elements, dtype=np.int64)
         npe = int(elems.shape[1])
@@ -110,9 +111,9 @@ class MoriTanaka3DOptimizer:
         self.ke0 = np.stack([self.fea.get_element_stiffness(i, rho_probe, penalty=1.0) for i in range(self.n_elements)], axis=0)
 
     def _build_filter_map(self):
+        from scipy.sparse import csr_matrix
         tree = cKDTree(self.centroids)
-        self.neighbors = []
-        self.weights = []
+        data, rows, cols = [], [], []
         for i in range(self.n_elements):
             ids = tree.query_ball_point(self.centroids[i], self.filter_radius)
             ids = np.asarray(ids, dtype=np.int64)
@@ -124,8 +125,10 @@ class MoriTanaka3DOptimizer:
                 w = np.asarray([1.0], dtype=np.float64)
             else:
                 w = w / s
-            self.neighbors.append(ids)
-            self.weights.append(w)
+            rows.extend([i] * len(ids))
+            cols.extend(ids)
+            data.extend(w)
+        self.H = csr_matrix((data, (rows, cols)), shape=(self.n_elements, self.n_elements))
 
     def _projection_beta(self, iteration):
         b0 = max(self.proj_beta_start, 1.0)
@@ -155,21 +158,25 @@ class MoriTanaka3DOptimizer:
         return rho
 
     def _apply_density_filter(self, rho):
-        rf = np.zeros_like(rho)
-        for i, (ids, w) in enumerate(zip(self.neighbors, self.weights)):
-            rf[i] = float(np.dot(w, rho[ids]))
+        rf = self.H.dot(rho)
         self._enforce_passive_solid(rf)
         return np.clip(rf, self.rho_min, 1.0)
 
     def _apply_sensitivity_filter(self, dc, rho):
-        sf = np.zeros_like(dc)
-        for i, (ids, w) in enumerate(zip(self.neighbors, self.weights)):
-            # Standard weighted average without density-normalization
-            # (avoids amplifying void-element sensitivities by 1/rho_min)
-            sf[i] = float(np.dot(w, dc[ids]))
-        return sf
+        return self.H.dot(dc)
 
-    def _effective_modulus_mori_tanaka(self, rho):
+    def _build_mt_lut(self):
+        self._lut_size = 1000
+        self._lut_rho = np.linspace(self.rho_min, 1.0, self._lut_size)
+        self._lut_E = self._effective_modulus_mori_tanaka_exact(self._lut_rho)
+        h = 1e-4
+        rp = np.clip(self._lut_rho + h, self.rho_min, 1.0)
+        rm = np.clip(self._lut_rho - h, self.rho_min, 1.0)
+        ep = self._effective_modulus_mori_tanaka_exact(rp)
+        em = self._effective_modulus_mori_tanaka_exact(rm)
+        self._lut_dEdrho = np.maximum((ep - em) / np.maximum(rp - rm, 1e-12), 1e-12)
+
+    def _effective_modulus_mori_tanaka_exact(self, rho):
         """Mori-Tanaka isotropic porous-solid effective modulus estimate.
 
         Computes effective Young's modulus for a solid matrix containing spherical
@@ -207,15 +214,25 @@ class MoriTanaka3DOptimizer:
         e_eff = np.clip(e_eff, self.rho_min * E0, E0)
         return e_eff
 
-    def _effective_modulus_derivative(self, rho):
+    def _effective_modulus_mori_tanaka(self, rho):
+        """Fast interpolation from precomputed MT lookup table."""
+        r = np.clip(np.asarray(rho, dtype=np.float64), self.rho_min, 1.0)
+        return np.interp(r, self._lut_rho, self._lut_E)
+
+    def _effective_modulus_derivative_exact(self, rho):
         r = np.clip(np.asarray(rho, dtype=np.float64), self.rho_min, 1.0)
         h = 1e-4
         rp = np.clip(r + h, self.rho_min, 1.0)
         rm = np.clip(r - h, self.rho_min, 1.0)
-        ep = self._effective_modulus_mori_tanaka(rp)
-        em = self._effective_modulus_mori_tanaka(rm)
+        ep = self._effective_modulus_mori_tanaka_exact(rp)
+        em = self._effective_modulus_mori_tanaka_exact(rm)
         d = (ep - em) / np.maximum(rp - rm, 1e-12)
         return np.maximum(d, 1e-12)
+
+    def _effective_modulus_derivative(self, rho):
+        """Fast interpolation from precomputed MT derivative lookup table."""
+        r = np.clip(np.asarray(rho, dtype=np.float64), self.rho_min, 1.0)
+        return np.interp(r, self._lut_rho, self._lut_dEdrho)
 
     def _equivalent_simp_density_from_modulus(self, e_eff):
         # Map effective modulus back to SIMP density so existing FEA routines can be reused.

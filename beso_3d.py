@@ -104,9 +104,9 @@ class BESO3DOptimizer:
         self.ke0 = np.stack([self.fea.get_element_stiffness(i, rho_probe, penalty=1.0) for i in range(self.n_elements)], axis=0)
 
     def _build_filter_map(self):
+        from scipy.sparse import csr_matrix
         tree = cKDTree(self.centroids)
-        self.neighbors = []
-        self.weights = []
+        data, rows, cols = [], [], []
         for i in range(self.n_elements):
             ids = tree.query_ball_point(self.centroids[i], self.filter_radius)
             ids = np.asarray(ids, dtype=np.int64)
@@ -118,8 +118,10 @@ class BESO3DOptimizer:
                 w = np.asarray([1.0], dtype=np.float64)
             else:
                 w = w / s
-            self.neighbors.append(ids)
-            self.weights.append(w)
+            rows.extend([i] * len(ids))
+            cols.extend(ids)
+            data.extend(w)
+        self.H = csr_matrix((data, (rows, cols)), shape=(self.n_elements, self.n_elements))
 
     def _projection_beta(self, iteration):
         b0 = max(self.proj_beta_start, 1.0)
@@ -268,12 +270,9 @@ class BESO3DOptimizer:
         return rho
 
     def _apply_sensitivity_filter(self, sens, rho):
-        out = np.zeros_like(sens)
-        for i, (ids, w) in enumerate(zip(self.neighbors, self.weights)):
-            # Standard BESO: weighted average without density-normalization
-            # (avoids amplifying void-element sensitivities by 1/rho_min)
-            out[i] = float(np.dot(w, sens[ids]))
-        return out
+        # Standard BESO: weighted average without density-normalization
+        # Vectorized via compiled sparse matrix multiplication.
+        return self.H.dot(sens)
 
     def _compute_sensitivity(self, u, rho):
         ue = u[self.elem_dofs]
