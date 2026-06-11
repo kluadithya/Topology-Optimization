@@ -619,9 +619,9 @@ class UnifiedWorkflowGUI:
                     'n_labels': 7,
                     'vertical': True,
                     'position_x': 0.85,
-                    'position_y': 0.25,
+                    'position_y': 0.35,
                     'width': 0.08,
-                    'height': 0.6,
+                    'height': 0.55,
                 },
                 smooth_shading=True,
                 ambient=0.25,
@@ -916,6 +916,7 @@ class UnifiedWorkflowGUI:
             ]
 
             max_vm = float(np.max(vm_clipped)) if len(vm_clipped) > 0 else 1.0
+            self._clear_scalar_bars()
             self._post_stress_actor = p.add_mesh(
                 surface,
                 scalars='von_mises',
@@ -932,9 +933,9 @@ class UnifiedWorkflowGUI:
                     'n_labels': 7,
                     'vertical': True,
                     'position_x': 0.85,
-                    'position_y': 0.25,
+                    'position_y': 0.35,
                     'width': 0.08,
-                    'height': 0.6,
+                    'height': 0.55,
                 },
                 smooth_shading=True,
                 ambient=0.25,
@@ -3172,9 +3173,9 @@ class UnifiedWorkflowGUI:
                     'n_labels': 5,
                     'vertical': True,
                     'position_x': 0.85,
-                    'position_y': 0.25,
+                    'position_y': 0.35,
                     'width': 0.08,
-                    'height': 0.6,
+                    'height': 0.55,
                 },
             )
         except Exception as e:
