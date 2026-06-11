@@ -35,6 +35,10 @@ class LSM3DOptimizer:
             )
         except Exception:
             pass
+        # LSM's Heaviside-projected densities create near-binary stiffness jumps
+        # that choke PyAMG's multigrid hierarchy construction. CHOLMOD with cached
+        # symbolic factorization gives exact solutions in 2-3s per iteration.
+        self.fea.linear_solver_mode = 'direct'
         self.material = material
         self.n_elements = int(elements.shape[0])
 

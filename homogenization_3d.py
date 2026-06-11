@@ -34,6 +34,9 @@ class MoriTanaka3DOptimizer:
             )
         except Exception:
             pass
+        # Mori-Tanaka effective moduli create non-smooth stiffness distributions
+        # that degrade AMG coarsening. CHOLMOD direct solver is preferred.
+        self.fea.linear_solver_mode = 'direct'
         self.material = material
         self.n_elements = int(elements.shape[0])
 

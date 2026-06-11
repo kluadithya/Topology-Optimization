@@ -22,6 +22,11 @@ class BESO3DOptimizer:
             )
         except Exception:
             pass
+        # BESO uses binary (0/1) densities which create extreme stiffness contrasts
+        # (1e6:1). This causes PyAMG's smoothed aggregation to spend 300+ seconds
+        # building multigrid hierarchies. CHOLMOD direct solver with cached symbolic
+        # factorization solves the same system in 2-3s regardless of contrast ratio.
+        self.fea.linear_solver_mode = 'direct'
         self.material = material
         self.n_elements = int(elements.shape[0])
 
