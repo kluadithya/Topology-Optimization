@@ -64,7 +64,7 @@ class LSM3DOptimizer:
         self.time_step = float(config.get('lsm_time_step', 0.25))
         self.cfl_factor = float(config.get('lsm_cfl_factor', 0.5))  # CFL safety factor
         self.epsilon = float(config.get('lsm_heaviside_epsilon', 0.10))  # Heaviside regularization width
-        self.reinit_interval = int(max(0, config.get('lsm_reinit_interval', 5)))
+        self.reinit_interval = int(max(0, config.get('lsm_reinit_interval', 10)))
         self.reinit_method = str(config.get('lsm_reinit_method', 'fast_marching')).lower()
         self.init_mode = str(config.get('lsm_init_mode', 'ellipsoid')).lower()
         self.init_noise = float(max(config.get('lsm_init_noise', 0.0), 0.0))
@@ -485,7 +485,14 @@ class LSM3DOptimizer:
         dt = min(self.time_step * h, dt_cfl)
 
         # H-J update: phi_new = phi - dt * V_n * |grad_phi|
-        self.phi = self.phi - dt * velocity * grad_mag_safe
+        dphi = dt * velocity * grad_mag_safe
+
+        # Clamp per-element update to ±0.5*h to prevent overshooting
+        # (standard CFL stability guarantee for level-set methods)
+        max_step = 0.5 * h
+        dphi = np.clip(dphi, -max_step, max_step)
+
+        self.phi = self.phi - dphi
 
         # Clamp phi to avoid blow-up
         self.phi = np.clip(self.phi, -20.0 * h, 20.0 * h)
@@ -497,7 +504,7 @@ class LSM3DOptimizer:
         """Shift phi uniformly to satisfy the volume constraint."""
         eps = max(self.epsilon * self.filter_radius, 1e-12)
 
-        lo, hi = -50.0 * eps, 50.0 * eps
+        lo, hi = -200.0 * eps, 200.0 * eps
         for _ in range(60):
             mid = 0.5 * (lo + hi)
             rho_trial = self._heaviside_density(self.phi + mid)
@@ -572,7 +579,7 @@ class LSM3DOptimizer:
         phi_new = sign * dist
 
         # Smooth blend with current phi to avoid discontinuities
-        blend = float(self.config.get('lsm_reinit_blend', 0.70))
+        blend = float(self.config.get('lsm_reinit_blend', 0.40))
         self.phi = blend * phi_new + (1.0 - blend) * self.phi
         self.phi = np.clip(self.phi, -20.0 * max(self.filter_radius, 1e-6), 20.0 * max(self.filter_radius, 1e-6))
         self._enforce_passive_on_phi()
@@ -597,6 +604,8 @@ class LSM3DOptimizer:
         prev_phi = None
         prev_comp = None
         stable_count = 0
+        # Rolling window for compliance stabilization detection
+        rolling_window = int(max(self.stall_patience, 8))
 
         print('\n' + '=' * 60)
         print('3D Level-Set Optimization (Hamilton-Jacobi PDE, Auto-Stop)')
@@ -692,8 +701,16 @@ class LSM3DOptimizer:
             prev_phi = self.phi.copy()
             prev_comp = compliance
 
-            if (it + 1) >= self.min_iterations and comp_rel < self.comp_tol:
-                stable_count += 1
+            # Rolling-window convergence: check if compliance has stabilized
+            # over the last N iterations (mean-relative-spread < tolerance)
+            if (it + 1) >= self.min_iterations and len(compliance_history) >= rolling_window:
+                window = compliance_history[-rolling_window:]
+                c_mean = float(np.mean(window))
+                c_spread = float(np.max(window) - np.min(window))
+                if c_spread / max(abs(c_mean), 1e-12) < self.comp_tol:
+                    stable_count += 1
+                else:
+                    stable_count = 0
             else:
                 stable_count = 0
 

@@ -69,7 +69,9 @@ class MoriTanaka3DOptimizer:
         else:
             self.filter_radius = float(max(config.get('filter_radius', 1.0), 1e-9))
             self.element_size = np.nan
-        self.move_limit = float(config.get('move_limit', 0.08))
+        self.move_limit_start = float(config.get('move_limit_start', config.get('move_limit', 0.20)))
+        self.move_limit_end = float(config.get('move_limit_end', 0.02))
+        self.move_limit = self.move_limit_start
         self.rho_min = float(config.get('rho_min', getattr(material, 'rho_min', 1e-6)))
         self.rho_min = float(np.clip(self.rho_min, 1e-9, 5e-2))
 
@@ -286,9 +288,17 @@ class MoriTanaka3DOptimizer:
 
         return base, vol
 
-    def _oc_update(self, rho, dc, dv):
+    def _current_move_limit(self, iteration):
+        """Adaptive move limit: large early for fast exploration, small late for fine convergence."""
+        if self.max_iterations <= 1:
+            return self.move_limit_end
+        t = float(iteration) / float(max(self.max_iterations - 1, 1))
+        # Exponential decay from start to end
+        return self.move_limit_start * ((self.move_limit_end / max(self.move_limit_start, 1e-12)) ** t)
+
+    def _oc_update(self, rho, dc, dv, iteration=0):
         l1, l2 = 0.0, 1e9
-        move = self.move_limit
+        move = self._current_move_limit(iteration)
         rho = np.clip(rho, self.rho_min, 1.0)
         cand = rho.copy()
         for _ in range(100):
@@ -312,6 +322,8 @@ class MoriTanaka3DOptimizer:
         compliance_history = []
         prev_comp = None
         stable_count = 0
+        # Rolling window for compliance stabilization detection
+        rolling_window = int(max(self.stall_patience, 8))
 
         print('\n' + '=' * 60)
         print('3D Mori-Tanaka Material Interpolation Optimization (Auto-Stop)')
@@ -360,15 +372,23 @@ class MoriTanaka3DOptimizer:
             dc = self._apply_sensitivity_filter(dc, rho_phys)
             dv = self._apply_sensitivity_filter(dv, rho_phys)
 
-            rho_new = self._oc_update(rho, dc, dv)
+            rho_new = self._oc_update(rho, dc, dv, iteration=it)
             self._enforce_passive_solid(rho_new)
             rho_change = float(np.max(np.abs(rho_new - rho)))
             comp_rel = abs(compliance - prev_comp) / max(abs(compliance), 1e-12) if prev_comp is not None else np.inf
             prev_comp = compliance
             rho = rho_new
 
-            if (it + 1) >= self.min_iterations and rho_change < self.change_tol and comp_rel < self.comp_tol:
-                stable_count += 1
+            # Rolling-window convergence: check if compliance has stabilized
+            # over the last N iterations (mean-relative-spread < tolerance)
+            if (it + 1) >= self.min_iterations and len(compliance_history) >= rolling_window:
+                window = compliance_history[-rolling_window:]
+                c_mean = float(np.mean(window))
+                c_spread = float(np.max(window) - np.min(window))
+                if c_spread / max(abs(c_mean), 1e-12) < self.comp_tol:
+                    stable_count += 1
+                else:
+                    stable_count = 0
             else:
                 stable_count = 0
 
@@ -382,6 +402,7 @@ class MoriTanaka3DOptimizer:
                     print(f'  [VIEWER] {e}')
 
             t_iter = time.time() - t0
+            cur_ml = self._current_move_limit(it)
             print(f'  Iteration {it + 1}: C={compliance:.6e}, V={vol:.4f}, dR={rho_change:.3e}, Ani={tensor["anisotropy"]:.3f}, T={t_iter:.1f}s')
 
             if stable_count >= self.stall_patience:
