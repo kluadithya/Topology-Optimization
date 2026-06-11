@@ -195,10 +195,8 @@ class LSM3DOptimizer:
     def _enforce_load_path_connectivity(self, fixed_dofs, forces):
         """Ensure phi maintains connected load paths between supports and loads.
 
-        After H-J evolution, checks if the implied solid region connects all
-        loaded elements to support elements.  If disconnected, sets phi of
-        bridging elements and their neighbors to positive (solid) to restore
-        a structurally viable load path.
+        Uses SciPy's compiled C-graph shortest_path to instantly find bridging
+        paths across disconnected components.
         """
         elems = self.fea.elements
 
@@ -218,76 +216,53 @@ class LSM3DOptimizer:
         self.phi[support_mask] = np.maximum(self.phi[support_mask], eps * 2.0)
         self.phi[load_mask] = np.maximum(self.phi[load_mask], eps * 2.0)
 
-        support_set = set(np.where(support_mask)[0].tolist())
-        load_set = set(np.where(load_mask)[0].tolist())
+        support_set = np.where(support_mask)[0].astype(np.int32)
+        load_set = np.where(load_mask)[0].astype(np.int32)
 
+        rho = self._heaviside_density()
+        is_solid = rho >= 0.5
+        
+        node_weights = np.where(is_solid, 1e-6, 1.0)
+        data = node_weights[self._adj_cols]
+        
+        N = self.n_elements
+        ss_rows = np.full(len(support_set), N, dtype=np.int32)
+        ss_cols = support_set
+        ss_data = node_weights[support_set]
+        
+        all_rows = np.concatenate([self._adj_rows, ss_rows])
+        all_cols = np.concatenate([self._adj_cols, ss_cols])
+        all_data = np.concatenate([data, ss_data])
+        
+        from scipy.sparse import csr_matrix
+        from scipy.sparse.csgraph import shortest_path
+        
+        graph = csr_matrix((all_data, (all_rows, all_cols)), shape=(N + 1, N + 1))
+        
+        dist, pred = shortest_path(graph, directed=True, indices=N, return_predecessors=True)
+        
+        load_dists = dist[load_set]
+        disconnected_loads = load_set[load_dists >= 0.5]
+        
         total_restored = 0
-        max_bridge_passes = 5
-
-        for _pass in range(max_bridge_passes):
-            rho = self._heaviside_density()
-            is_solid = rho >= 0.5
-
-            # BFS from support elements through solid elements
-            reachable = np.zeros(self.n_elements, dtype=bool)
-            queue = deque()
-            for e in support_set:
-                if is_solid[e]:
-                    reachable[e] = True
-                    queue.append(e)
-            while queue:
-                e = queue.popleft()
-                for nb in self.elem_neighbors[e]:
-                    if not reachable[nb] and is_solid[nb]:
-                        reachable[nb] = True
-                        queue.append(nb)
-
-            unreachable = load_set - set(np.where(reachable)[0].tolist())
-            if not unreachable:
-                break
-
-            # Bridge: BFS from reachable set through ALL elements
-            parent = np.full(self.n_elements, -1, dtype=np.int64)
-            for e in range(self.n_elements):
-                if reachable[e]:
-                    parent[e] = e
-            bq = deque(e for e in range(self.n_elements) if reachable[e])
-            found = -1
-            while bq and found < 0:
-                e = bq.popleft()
-                for nb in self.elem_neighbors[e]:
-                    if parent[nb] < 0:
-                        parent[nb] = e
-                        if nb in unreachable:
-                            found = nb
-                            break
-                        bq.append(nb)
-
-            if found < 0:
-                break
-
-            # Trace back path and restore bridging elements + neighbors
-            bridge_path = []
-            e = found
-            while e >= 0 and not reachable[e]:
-                bridge_path.append(e)
-                reachable[e] = True
-                e = int(parent[e])
-
-            for be in bridge_path:
-                if self.phi[be] < eps:
-                    self.phi[be] = eps * 2.0
+        if len(disconnected_loads) == 0:
+            return
+            
+        for target in disconnected_loads:
+            curr = target
+            while curr != N and curr >= 0:
+                if self.phi[curr] < eps:
+                    self.phi[curr] = eps * 2.0
                     total_restored += 1
-
-            # Thicken bridge: also restore immediate neighbors
-            for be in bridge_path:
-                for nb in self.elem_neighbors[be]:
+                for nb in self.elem_neighbors[curr]:
                     if self.phi[nb] < eps:
                         self.phi[nb] = eps * 2.0
                         total_restored += 1
-
+                curr = pred[curr]
+                
         if total_restored > 0:
-            print(f'    [CONNECTIVITY] Restored {total_restored} bridging elements')
+            print(f'    [CONNECTIVITY] Restored load paths ({total_restored} elements bridged).')
+            
         self._enforce_passive_on_phi()
 
     # â”€â”€ Regularized Heaviside: maps phi â†’ density â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -353,13 +328,21 @@ class LSM3DOptimizer:
                 if 0 <= ni < n_nodes:
                     node_to_elems[ni].append(eidx)
 
+        rows = []
+        cols = []
         self.elem_neighbors = []
         for eidx in range(self.n_elements):
             nset = set()
             for nid in elems[eidx]:
                 nset.update(node_to_elems[int(nid)])
             nset.discard(eidx)
-            self.elem_neighbors.append(np.asarray(sorted(nset), dtype=np.int64))
+            nbrs = np.asarray(sorted(nset), dtype=np.int64)
+            self.elem_neighbors.append(nbrs)
+            rows.extend([eidx] * len(nbrs))
+            cols.extend(nbrs)
+            
+        self._adj_rows = np.array(rows, dtype=np.int32)
+        self._adj_cols = np.array(cols, dtype=np.int32)
 
     # â”€â”€ Gradient computation: least-squares on unstructured mesh â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
