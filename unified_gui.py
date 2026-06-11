@@ -1988,7 +1988,9 @@ class UnifiedWorkflowGUI:
                 tri_pts = nodes[np.asarray(selected_tris, dtype=np.int64)]
                 tri_centers = np.mean(tri_pts, axis=1)
                 tri_edge_max = np.max(np.linalg.norm(tri_pts[:, 1, :] - tri_pts[:, 0, :], axis=1)) if tri_pts.shape[0] > 0 else 0.0
-                search_pad = float(effective_distance + tri_edge_max)
+                # search_pad is only the triangle radius so we find nearby tri candidates
+                # whose centroid may be further than effective_distance but whose vertices are not.
+                search_pad = float(tri_edge_max)
 
                 try:
                     from scipy.spatial import cKDTree
@@ -2067,7 +2069,7 @@ class UnifiedWorkflowGUI:
                         e20 = np.linalg.norm(tri_pts[:, 0, :] - tri_pts[:, 2, :], axis=1)
                         edge_ref = float(np.median(np.hstack([e01, e12, e20])))
                     if edge_ref is not None and edge_ref > 1e-12:
-                        layers = int(max(1, np.ceil(effective_distance / edge_ref)))
+                        layers = int(np.ceil(effective_distance / edge_ref))
                         n_nodes_total = int(nodes.shape[0])
                         node_to_elems = [[] for _ in range(n_nodes_total)]
                         for eidx in range(n_elem):
