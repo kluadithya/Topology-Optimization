@@ -591,6 +591,7 @@ class LSM3DOptimizer:
         n_iter = self.max_iterations if n_iterations is None else int(min(max(1, n_iterations), self.max_iterations))
         compliance_history = []
         prev_rho = None
+        prev_phi = None
         prev_comp = None
         stable_count = 0
 
@@ -675,12 +676,19 @@ class LSM3DOptimizer:
                 violation = np.maximum(vm / max(self.allowable_stress, 1e-12) - 1.0, 0.0)
                 violate_frac = float(np.mean(violation > 0.0)) if violation.size else 0.0
 
+            # For LSM, tracking max density change (rho_change) is unreliable because 
+            # the Heaviside projection causes boundary elements to violently oscillate 
+            # between 0 and 1 even when the structure has converged.
+            # Instead, we rely purely on the objective compliance stabilizing.
             rho_change = float(np.max(np.abs(rho - prev_rho))) if prev_rho is not None else np.inf
+            phi_change = float(np.max(np.abs(self.phi - prev_phi))) if prev_phi is not None else np.inf
             comp_rel = abs(compliance - prev_comp) / max(abs(compliance), 1e-12) if prev_comp is not None else np.inf
+            
             prev_rho = rho.copy()
+            prev_phi = self.phi.copy()
             prev_comp = compliance
 
-            if (it + 1) >= self.min_iterations and rho_change < self.change_tol and comp_rel < self.comp_tol:
+            if (it + 1) >= self.min_iterations and comp_rel < self.comp_tol:
                 stable_count += 1
             else:
                 stable_count = 0
