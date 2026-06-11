@@ -283,7 +283,8 @@ class LSM3DOptimizer:
         """
         if phi is None:
             phi = self.phi
-        eps = max(self.epsilon * self.filter_radius, 1e-12)
+        h = self.element_size if np.isfinite(self.element_size) and self.element_size > 0.0 else 1.0
+        eps = max(self.epsilon * self.filter_radius, 1.5 * h)
         rho = np.zeros(self.n_elements, dtype=np.float64)
 
         # Region: phi > eps â†’ solid
@@ -309,7 +310,8 @@ class LSM3DOptimizer:
         """
         if phi is None:
             phi = self.phi
-        eps = max(self.epsilon * self.filter_radius, 1e-12)
+        h = self.element_size if np.isfinite(self.element_size) and self.element_size > 0.0 else 1.0
+        eps = max(self.epsilon * self.filter_radius, 1.5 * h)
         delta = np.zeros(self.n_elements, dtype=np.float64)
 
         band = np.abs(phi) <= eps
@@ -478,7 +480,7 @@ class LSM3DOptimizer:
             return
 
         # Characteristic mesh size for CFL
-        h = max(self.element_size if np.isfinite(self.element_size) else self.filter_radius, 1e-12)
+        h = self.element_size if np.isfinite(self.element_size) and self.element_size > 0.0 else 1.0
         dt_cfl = self.cfl_factor * h / max(max_vel, 1e-12)
         dt = min(self.time_step * h, dt_cfl)
 
@@ -520,7 +522,8 @@ class LSM3DOptimizer:
         rho = self._heaviside_density()
 
         # Find interface elements: those near phi=0 (rho near 0.5)
-        eps = max(self.epsilon * self.filter_radius, 1e-12)
+        h = self.element_size if np.isfinite(self.element_size) and self.element_size > 0.0 else 1.0
+        eps = max(self.epsilon * self.filter_radius, 1.5 * h)
         interface = np.abs(self.phi) <= eps
         if not np.any(interface):
             # Fallback: find elements closest to rho=0.5
@@ -539,8 +542,8 @@ class LSM3DOptimizer:
 
         seed_ids = np.where(interface)[0]
         for i in seed_ids.tolist():
-            # Initialize with |phi| as starting distance (more accurate than 0)
-            d0 = abs(float(self.phi[i]))
+            # Initialize with 0 as we are in the band (better than using distorted phi)
+            d0 = 0.0
             dist[i] = d0
             heapq.heappush(heap, (d0, int(i)))
 
@@ -618,7 +621,8 @@ class LSM3DOptimizer:
                 self.member_projector.set_beta(self._projection_beta(it))
                 rho = self.member_projector.apply(rho, target_volume=self.volfrac_eff, rho_min=self.rho_min)
             else:
-                rho = self.filter.apply_density(rho)
+                # Do NOT filter the physical density rho in classical LSM!
+                pass
             self._enforce_passive_on_rho(rho)
 
             # Physical density for FEA (SIMP interpolation for smooth void regions)
@@ -640,8 +644,8 @@ class LSM3DOptimizer:
                 # Normalize delta to [0, 1] range and use as weight
                 weight = delta_h / delta_max
                 # Keep update mostly interface-local to avoid speckled void nucleation.
-                if self.nucleation_weight_floor > 0.0:
-                    weight = np.maximum(weight, self.nucleation_weight_floor)
+                floor = max(self.nucleation_weight_floor, 0.1)
+                weight = np.maximum(weight, floor)
                 velocity = velocity * weight
 
             if self.velocity_smooth_passes > 0:
