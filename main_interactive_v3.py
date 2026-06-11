@@ -1129,21 +1129,40 @@ class InteractiveTopologyOptimizer:
         if self.forces is None or self.fixed_dofs is None:
             return
 
-        # Only SIMP optimizer has run_verification_fea
+        optimizer_class = None
         try:
-            from simp_3d import SIMP3DOptimizer
-        except ImportError:
+            if self.optimization_method == 'SIMP':
+                from simp_3d import SIMP3DOptimizer
+                optimizer_class = SIMP3DOptimizer
+            elif self.optimization_method == 'BESO':
+                from beso_3d import BESO3DOptimizer
+                optimizer_class = BESO3DOptimizer
+            elif self.optimization_method == 'LSM':
+                from lsm_3d import LSM3DOptimizer
+                optimizer_class = LSM3DOptimizer
+            elif self.optimization_method in ('MORI_TANAKA', 'HOMOGENIZATION'):
+                from homogenization_3d import MoriTanaka3DOptimizer
+                optimizer_class = MoriTanaka3DOptimizer
+        except ImportError as e:
+            print(f'[WARNING] Could not import optimizer for verification FEA: {e}')
             return
 
-        if self.optimization_method != 'SIMP':
-            print('[INFO] Verification FEA is currently available for SIMP method only.')
+        if optimizer_class is None:
+            print(f'[INFO] Verification FEA is not yet supported for method: {self.optimization_method}')
             return
 
         try:
             threshold = float(self.config.get('threshold', 0.5))
             # Reconstruct a lightweight optimizer to access verification
-            optimizer = SIMP3DOptimizer(self.nodes, self.elements, self.material, self.config)
+            optimizer = optimizer_class(self.nodes, self.elements, self.material, self.config)
+            
+            # The optimizers expect 'self.rho' or equivalent for verification
+            # In LSM it usually reads self._binary_projection(), but we will set self.rho for compatibility
             optimizer.rho = np.asarray(self.results['rho_optimized'], dtype=np.float64)
+            # For LSM, we should also overwrite _binary_projection to return this rho just in case
+            if self.optimization_method == 'LSM':
+                optimizer._binary_projection = lambda: optimizer.rho
+
             verification = optimizer.run_verification_fea(self.forces, self.fixed_dofs, threshold=threshold)
             self.results['verification'] = verification
         except Exception as e:

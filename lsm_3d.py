@@ -707,5 +707,60 @@ class LSM3DOptimizer:
 
         return self._binary_projection(), compliance_history
 
+    def run_verification_fea(self, forces, fixed_dofs, threshold=0.5):
+        """Run verification FEA on the binary-thresholded (manufacturable) design."""
+        rho_cont = np.copy(self._binary_projection())
+        rho_binary = np.where(rho_cont >= threshold, 1.0, self.rho_min)
+        self._enforce_passive_on_rho(rho_binary)
 
+        print(f'\n{"="*60}')
+        print(f'  Verification FEA on Binary Design (threshold={threshold:.2f})')
+        print(f'{"="*60}')
+        n_solid = int(np.sum(rho_binary >= threshold))
+        print(f'  Solid elements: {n_solid}/{self.n_elements} ({100.0*n_solid/max(self.n_elements,1):.1f}%)')
 
+        u_cont = self.fea.solve(rho_cont, forces, fixed_dofs, self.penalty)
+        comp_cont = self.fea.calculate_compliance(u_cont, rho_cont, self.penalty)
+        max_disp_cont = float(np.max(np.abs(u_cont)))
+
+        u_bin = self.fea.solve(rho_binary, forces, fixed_dofs, self.penalty)
+        comp_bin = self.fea.calculate_compliance(u_bin, rho_binary, self.penalty)
+
+        solid_elem_mask = (rho_binary >= threshold)
+        solid_node_indices = np.unique(self.fea.elements[solid_elem_mask].flatten())
+        if solid_node_indices.size > 0:
+            solid_dofs = np.concatenate([
+                3 * solid_node_indices,
+                3 * solid_node_indices + 1,
+                3 * solid_node_indices + 2,
+            ])
+            max_disp_bin = float(np.max(np.abs(u_bin[solid_dofs])))
+        else:
+            max_disp_bin = 0.0
+
+        vm_bin = self.fea.calculate_stress_all_gauss(u_bin, rho_binary, self.penalty)
+        max_vm_bin = float(np.max(vm_bin)) if vm_bin.size > 0 else 0.0
+
+        comp_diff = 100.0 * abs(comp_bin - comp_cont) / max(abs(comp_cont), 1e-30)
+        disp_diff = 100.0 * abs(max_disp_bin - max_disp_cont) / max(abs(max_disp_cont), 1e-30)
+
+        print(f'\n  {"Metric":<25} {"Continuous":>14} {"Binary":>14} {"Diff %":>8}')
+        print(f'  {"-"*63}')
+        print(f'  {"Compliance":<25} {comp_cont:>14.4e} {comp_bin:>14.4e} {comp_diff:>7.1f}%')
+        print(f'  {"Max displacement":<25} {max_disp_cont:>14.4e} {max_disp_bin:>14.4e} {disp_diff:>7.1f}%')
+        print(f'  {"Max von Mises (binary)":<25} {"—":>14} {max_vm_bin:>14.4e}')
+        if hasattr(self, 'allowable_stress'):
+            ratio = max_vm_bin / max(self.allowable_stress, 1e-30)
+            status = 'OK' if ratio <= 1.0 else 'EXCEEDED'
+            print(f'  {"Stress ratio (σ/σ_allow)":<25} {"—":>14} {ratio:>14.3f} [{status}]')
+        print()
+
+        return {
+            'compliance_continuous': comp_cont,
+            'compliance_binary': comp_bin,
+            'max_disp_continuous': max_disp_cont,
+            'max_disp_binary': max_disp_bin,
+            'max_vm_binary': max_vm_bin,
+            'rho_binary': rho_binary,
+            'threshold': threshold,
+        }
