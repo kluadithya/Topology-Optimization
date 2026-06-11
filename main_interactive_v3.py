@@ -929,39 +929,10 @@ class InteractiveTopologyOptimizer:
                 return False, f'STL export failed: {e}'
 
     def _export_step(self, step_path, nodes, triangles):
-        # Primary path: gmsh surface classification usually produces a cleaner unified shell.
-        try:
-            import gmsh  # type: ignore
-            with tempfile.NamedTemporaryFile(suffix='.stl', delete=False) as tf:
-                temp_stl = tf.name
-
-            stl_ok, stl_msg = self._export_stl(temp_stl, nodes, triangles)
-            if not stl_ok:
-                return False, f'STEP export failed (STL staging failed): {stl_msg}'
-
-            gmsh.initialize()
-            try:
-                gmsh.open(temp_stl)
-                gmsh.model.mesh.classifySurfaces(np.deg2rad(40.0), True, True, np.pi)
-                gmsh.model.mesh.createGeometry()
-                gmsh.model.geo.synchronize()
-                gmsh.write(step_path)
-            finally:
-                gmsh.finalize()
-
-            try:
-                os.unlink(temp_stl)
-            except Exception:
-                pass
-
-            return True, 'Exported using gmsh STL-to-STEP shell reconstruction'
-        except Exception as e_gmsh:
-            try:
-                if 'temp_stl' in locals() and os.path.exists(temp_stl):
-                    os.unlink(temp_stl)
-            except Exception:
-                pass
-            gmsh_err = str(e_gmsh)
+        # Primary path (Gmsh) bypassed: Gmsh surface classification often hangs in an infinite
+        # tolerance loop when trying to fit analytical surfaces over complex/organic topology 
+        # optimization meshes. We skip straight to the safer pythonocc faceted fallback.
+        gmsh_err = "Gmsh analytical reconstruction bypassed to prevent infinite tolerance loops."
 
         # Fallback path: write faceted STEP directly with pythonocc.
         try:
