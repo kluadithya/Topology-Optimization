@@ -1,3 +1,4 @@
+import time
 import numpy as np
 from collections import deque
 from scipy.spatial import cKDTree
@@ -329,6 +330,7 @@ class BESO3DOptimizer:
             print(f'  [CONSTRAINT] Volume target increased from {self.volfrac:.4f} to {self.volfrac_eff:.4f} to keep support/load regions solid.')
 
         for it in range(n_iter):
+            t0 = time.time()
             vol = max(self.volfrac_eff, vol * (1.0 - self.er))
 
             if self.member_projector is not None:
@@ -375,7 +377,8 @@ class BESO3DOptimizer:
                 except Exception as e:
                     print(f'  [VIEWER] {e}')
 
-            print(f'  Iteration {it + 1}: C={compliance:.6e}, V={vnow:.4f}, dR={rho_change:.3e}, ER={self.er:.4f}')
+            t_iter = time.time() - t0
+            print(f'  Iteration {it + 1}: C={compliance:.6e}, V={vnow:.4f}, dR={rho_change:.3e}, ER={self.er:.4f}, T={t_iter:.1f}s')
 
             if stable_count >= self.stall_patience:
                 print(f'  [CONVERGED] Objective stabilized for {self.stall_patience} iterations; stopping at {it + 1}.')

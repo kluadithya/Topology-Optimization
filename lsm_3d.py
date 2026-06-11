@@ -10,6 +10,7 @@ Implements a proper geometric level-set method:
   - Regularized Heaviside for smooth density mapping
 """
 
+import time
 import heapq
 import numpy as np
 from collections import deque
@@ -617,6 +618,7 @@ class LSM3DOptimizer:
             print(f'  [CONSTRAINT] Volume target increased from {self.volfrac:.4f} to {self.volfrac_eff:.4f} to keep support/load regions solid.')
 
         for it in range(n_iter):
+            t0 = time.time()
             # 1. Enforce volume constraint by shifting phi
             self._enforce_volume()
 
@@ -705,11 +707,12 @@ class LSM3DOptimizer:
                 except Exception as e:
                     print(f'  [VIEWER] {e}')
 
+            t_iter = time.time() - t0
             if self.use_stress_constraint:
                 print(f'  Iteration {it + 1}: C={compliance:.6e}, V={vol:.4f}, dR={rho_change:.3e}, '
-                      f'VMmax={max_vm:.3e} Pa, Viol={100.0 * violate_frac:.1f}%')
+                      f'VMmax={max_vm:.3e} Pa, Viol={100.0 * violate_frac:.1f}%, T={t_iter:.1f}s')
             else:
-                print(f'  Iteration {it + 1}: C={compliance:.6e}, V={vol:.4f}, dR={rho_change:.3e}')
+                print(f'  Iteration {it + 1}: C={compliance:.6e}, V={vol:.4f}, dR={rho_change:.3e}, T={t_iter:.1f}s')
 
             if stable_count >= self.stall_patience:
                 print(f'  [CONVERGED] Objective stabilized for {self.stall_patience} iterations; stopping at {it + 1}.')
