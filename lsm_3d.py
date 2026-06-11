@@ -549,8 +549,8 @@ class LSM3DOptimizer:
 
         seed_ids = np.where(interface)[0]
         for i in seed_ids.tolist():
-            # Initialize with 0 as we are in the band (better than using distorted phi)
-            d0 = 0.0
+            # Initialize with absolute phi to preserve sub-element boundary position
+            d0 = float(np.abs(self.phi[i]))
             dist[i] = d0
             heapq.heappush(heap, (d0, int(i)))
 
