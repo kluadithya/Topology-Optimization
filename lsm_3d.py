@@ -57,7 +57,7 @@ class LSM3DOptimizer:
         self.max_iterations = int(config.get('max_iterations_auto', config.get('iterations', 300)))
         self.min_iterations = int(max(10, config.get('min_iterations_auto', 60)))
         self.change_tol = float(config.get('density_change_tolerance', 1e-3))
-        self.comp_tol = float(config.get('lsm_compliance_tolerance', config.get('compliance_tolerance', 1.5e-2)))
+        self.comp_tol = float(config.get('lsm_compliance_tolerance', config.get('compliance_tolerance', 2.0e-2)))
         self.stall_patience = int(max(3, config.get('stall_patience', 8)))
 
         # Hamilton-Jacobi PDE parameters
@@ -584,7 +584,9 @@ class LSM3DOptimizer:
         phi_new = sign * dist
 
         # Smooth blend with current phi to avoid discontinuities
-        blend = float(self.config.get('lsm_reinit_blend', 0.40))
+        # Use iteration-adaptive blend if available (strong early, gentle late)
+        blend = getattr(self, '_current_reinit_blend',
+                        float(self.config.get('lsm_reinit_blend', 0.40)))
         self.phi = blend * phi_new + (1.0 - blend) * self.phi
         self.phi = np.clip(self.phi, -20.0 * max(self.filter_radius, 1e-6), 20.0 * max(self.filter_radius, 1e-6))
         self._enforce_passive_on_phi()
@@ -698,7 +700,12 @@ class LSM3DOptimizer:
             self._enforce_load_path_connectivity(fixed_dofs, forces)
 
             # 6. Periodic reinitialization to signed distance
+            #    Taper blend: strong early (maintain signed-distance), gentle late (allow convergence)
             if self.reinit_interval > 0 and ((it + 1) % self.reinit_interval == 0):
+                progress = float(it) / float(max(n_iter - 1, 1))
+                blend_start = float(self.config.get('lsm_reinit_blend', 0.70))
+                blend_end = float(self.config.get('lsm_reinit_blend_end', 0.10))
+                self._current_reinit_blend = blend_start + (blend_end - blend_start) * progress
                 self._fast_marching_reinit()
 
             # 7. Convergence tracking
