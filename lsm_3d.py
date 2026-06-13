@@ -57,7 +57,7 @@ class LSM3DOptimizer:
         self.max_iterations = int(config.get('max_iterations_auto', config.get('iterations', 300)))
         self.min_iterations = int(max(10, config.get('min_iterations_auto', 60)))
         self.change_tol = float(config.get('density_change_tolerance', 1e-3))
-        self.comp_tol = float(config.get('compliance_tolerance', 5e-4))
+        self.comp_tol = float(config.get('lsm_compliance_tolerance', config.get('compliance_tolerance', 1.5e-2)))
         self.stall_patience = int(max(3, config.get('stall_patience', 8)))
 
         # Hamilton-Jacobi PDE parameters
@@ -72,6 +72,8 @@ class LSM3DOptimizer:
         self.nucleation_weight_floor = float(np.clip(config.get('lsm_nucleation_weight_floor', 0.0), 0.0, 1.0))
         self.phi_smooth_weight = float(np.clip(config.get('lsm_phi_smooth_weight', 0.15), 0.0, 0.49))
         self.phi_smooth_passes = int(max(0, config.get('lsm_phi_smooth_passes', 1)))
+        self.dt_decay_rate = float(config.get('lsm_dt_decay_rate', 0.995))
+        self._velocity_scale = 1.0
 
         self.rho_min = float(config.get('rho_min', getattr(material, 'rho_min', 1e-6)))
         self.rho_min = float(np.clip(self.rho_min, 1e-9, 5e-2))
@@ -482,7 +484,7 @@ class LSM3DOptimizer:
         # Characteristic mesh size for CFL
         h = self.element_size if np.isfinite(self.element_size) and self.element_size > 0.0 else 1.0
         dt_cfl = self.cfl_factor * h / max(max_vel, 1e-12)
-        dt = min(self.time_step * h, dt_cfl)
+        dt = min(self.time_step * h, dt_cfl) * self._velocity_scale
 
         # H-J update: phi_new = phi - dt * V_n * |grad_phi|
         dphi = dt * velocity * grad_mag_safe
@@ -605,7 +607,7 @@ class LSM3DOptimizer:
         prev_comp = None
         stable_count = 0
         # Rolling window for compliance stabilization detection
-        rolling_window = int(max(self.stall_patience, 8))
+        rolling_window = int(max(self.stall_patience, 15))
 
         print('\n' + '=' * 60)
         print('3D Level-Set Optimization (Hamilton-Jacobi PDE, Auto-Stop)')
@@ -613,6 +615,7 @@ class LSM3DOptimizer:
         print(f'  [LSM] H-J PDE evolution with upwind gradient, CFL={self.cfl_factor:.2f}')
         print(f'  [LSM] Regularized Heaviside eps={self.epsilon:.3f} * filter_radius')
         print(f'  [LSM] Reinitialization every {self.reinit_interval} iterations (method: {self.reinit_method})')
+        print(f'  [LSM] Adaptive dt decay={self.dt_decay_rate:.4f}, convergence tol={self.comp_tol:.1e}')
 
         if self.volfrac_eff > self.volfrac + 1e-12:
             print(f'  [CONSTRAINT] Volume target increased from {self.volfrac:.4f} to {self.volfrac_eff:.4f} to keep support/load regions solid.')
@@ -669,7 +672,15 @@ class LSM3DOptimizer:
             if np.any(self.passive_solid):
                 velocity[self.passive_solid] = 0.0
 
-            # 5. Evolve phi via Hamilton-Jacobi PDE
+            # 5. Adaptive time-step scaling: gradual decay reduces late-stage oscillation
+            self._velocity_scale = self.dt_decay_rate ** it
+            if len(compliance_history) >= 4:
+                diffs = np.diff(compliance_history[-4:])
+                signs = np.sign(diffs)
+                if np.sum(signs[:-1] * signs[1:] < 0) >= 2:
+                    self._velocity_scale *= 0.85
+
+            # Evolve phi via Hamilton-Jacobi PDE
             self._upwind_hj_update(velocity)
             self._smooth_phi()
 
