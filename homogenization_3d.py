@@ -1,8 +1,7 @@
 import time
 import numpy as np
-from scipy.spatial import cKDTree
 from fea_solver_3d import FEASolver3D
-from density_filter_3d import MinimumMemberSizeProjection3D, auto_filter_radius_from_mesh
+from density_filter_3d import DensityFilter3D, MinimumMemberSizeProjection3D, auto_filter_radius_from_mesh
 
 
 class MoriTanaka3DOptimizer:
@@ -107,7 +106,7 @@ class MoriTanaka3DOptimizer:
         self.volfrac_eff = float(np.clip(max(self.volfrac, min_target), 0.05, 1.0))
 
         self.centroids = np.mean(self.fea.nodes[self.fea.elements], axis=1)
-        self._build_filter_map()
+        self.filter = DensityFilter3D(self.fea.nodes, self.fea.elements, self.filter_radius)
         self._build_mt_lut()
 
         elems = np.asarray(self.fea.elements, dtype=np.int64)
@@ -116,25 +115,7 @@ class MoriTanaka3DOptimizer:
         rho_probe = np.ones(self.n_elements, dtype=np.float64)
         self.ke0 = np.stack([self.fea.get_element_stiffness(i, rho_probe, penalty=1.0) for i in range(self.n_elements)], axis=0)
 
-    def _build_filter_map(self):
-        from scipy.sparse import csr_matrix
-        tree = cKDTree(self.centroids)
-        data, rows, cols = [], [], []
-        for i in range(self.n_elements):
-            ids = tree.query_ball_point(self.centroids[i], self.filter_radius)
-            ids = np.asarray(ids, dtype=np.int64)
-            d = np.linalg.norm(self.centroids[ids] - self.centroids[i], axis=1)
-            w = np.maximum(0.0, self.filter_radius - d)
-            s = float(np.sum(w))
-            if s <= 0.0:
-                ids = np.asarray([i], dtype=np.int64)
-                w = np.asarray([1.0], dtype=np.float64)
-            else:
-                w = w / s
-            rows.extend([i] * len(ids))
-            cols.extend(ids)
-            data.extend(w)
-        self.H = csr_matrix((data, (rows, cols)), shape=(self.n_elements, self.n_elements))
+
 
     def _projection_beta(self, iteration):
         b0 = max(self.proj_beta_start, 1.0)
@@ -164,12 +145,12 @@ class MoriTanaka3DOptimizer:
         return rho
 
     def _apply_density_filter(self, rho):
-        rf = self.H.dot(rho)
+        rf = self.filter.apply_density(rho)
         self._enforce_passive_solid(rf)
         return np.clip(rf, self.rho_min, 1.0)
 
     def _apply_sensitivity_filter(self, dc, rho):
-        return self.H.dot(dc)
+        return self.filter.apply_sensitivity(dc)
 
     def _build_mt_lut(self):
         self._lut_size = 1000
@@ -301,6 +282,8 @@ class MoriTanaka3DOptimizer:
         move = self._current_move_limit(iteration)
         rho = np.clip(rho, self.rho_min, 1.0)
         cand = rho.copy()
+        target_vol = self.volfrac_eff * self.n_elements
+        
         for _ in range(100):
             lmid = 0.5 * (l1 + l2)
             ratio = -dc / np.maximum(dv * lmid, 1e-30)
@@ -309,10 +292,20 @@ class MoriTanaka3DOptimizer:
             cand = np.clip(cand, rho - move, rho + move)
             cand = np.clip(cand, self.rho_min, 1.0)
             self._enforce_passive_solid(cand)
-            if float(np.mean(cand)) > self.volfrac_eff:
+            
+            # Use exact linearly-filtered physical volume via dv = H.T * 1
+            if float(np.sum(dv * cand)) > target_vol:
                 l1 = lmid
             else:
                 l2 = lmid
+                
+        # Volume correction to prevent drift
+        actual_vol = float(np.sum(dv * cand)) / float(max(self.n_elements, 1))
+        if abs(actual_vol - self.volfrac_eff) > 0.005 and actual_vol > 1e-12:
+            cand *= self.volfrac_eff / actual_vol
+            cand = np.clip(cand, self.rho_min, 1.0)
+            self._enforce_passive_solid(cand)
+            
         return cand
 
     def optimize(self, forces, fixed_dofs, n_iterations=None, visualizer=None):
