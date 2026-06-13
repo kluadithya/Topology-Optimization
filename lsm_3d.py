@@ -74,6 +74,9 @@ class LSM3DOptimizer:
         self.phi_smooth_passes = int(max(0, config.get('lsm_phi_smooth_passes', 1)))
         self.dt_decay_rate = float(config.get('lsm_dt_decay_rate', 0.995))
         self._velocity_scale = 1.0
+        self._osc_damp = 1.0           # persistent oscillation damping factor
+        self._osc_recover = float(config.get('lsm_osc_recover', 1.02))  # recovery per iter
+        self._osc_reduce = float(config.get('lsm_osc_reduce', 0.75))    # reduction on detect
 
         self.rho_min = float(config.get('rho_min', getattr(material, 'rho_min', 1e-6)))
         self.rho_min = float(np.clip(self.rho_min, 1e-9, 5e-2))
@@ -606,8 +609,11 @@ class LSM3DOptimizer:
         prev_phi = None
         prev_comp = None
         stable_count = 0
+        self._osc_damp = 1.0
         # Rolling window for compliance stabilization detection
         rolling_window = int(max(self.stall_patience, 15))
+        # Majority-vote window: how many of the last N windows must be stable
+        vote_window = max(3, self.stall_patience // 2)
 
         print('\n' + '=' * 60)
         print('3D Level-Set Optimization (Hamilton-Jacobi PDE, Auto-Stop)')
@@ -672,13 +678,17 @@ class LSM3DOptimizer:
             if np.any(self.passive_solid):
                 velocity[self.passive_solid] = 0.0
 
-            # 5. Adaptive time-step scaling: gradual decay reduces late-stage oscillation
-            self._velocity_scale = self.dt_decay_rate ** it
-            if len(compliance_history) >= 4:
-                diffs = np.diff(compliance_history[-4:])
+            # 5. Adaptive time-step scaling: gradual decay + persistent oscillation damping
+            # Detect zig-zag: compliance alternates direction in last 6 points
+            if len(compliance_history) >= 6:
+                diffs = np.diff(compliance_history[-6:])
                 signs = np.sign(diffs)
-                if np.sum(signs[:-1] * signs[1:] < 0) >= 2:
-                    self._velocity_scale *= 0.85
+                sign_flips = int(np.sum(signs[:-1] * signs[1:] < 0))
+                if sign_flips >= 3:                         # oscillating
+                    self._osc_damp = max(self._osc_damp * self._osc_reduce, 0.05)
+                else:                                       # calming down — slowly recover
+                    self._osc_damp = min(self._osc_damp * self._osc_recover, 1.0)
+            self._velocity_scale = (self.dt_decay_rate ** it) * self._osc_damp
 
             # Evolve phi via Hamilton-Jacobi PDE
             self._upwind_hj_update(velocity)
@@ -712,16 +722,24 @@ class LSM3DOptimizer:
             prev_phi = self.phi.copy()
             prev_comp = compliance
 
-            # Rolling-window convergence: check if compliance has stabilized
-            # over the last N iterations (mean-relative-spread < tolerance)
+            # Rolling-window convergence: majority-vote so one spiky iter
+            # can't reset all progress.
             if (it + 1) >= self.min_iterations and len(compliance_history) >= rolling_window:
-                window = compliance_history[-rolling_window:]
-                c_mean = float(np.mean(window))
-                c_spread = float(np.max(window) - np.min(window))
-                if c_spread / max(abs(c_mean), 1e-12) < self.comp_tol:
+                # Check stability across `vote_window` overlapping sub-windows
+                votes_stable = 0
+                for lag in range(vote_window):
+                    sub = compliance_history[-(rolling_window + lag): len(compliance_history) - lag if lag > 0 else None]
+                    if len(sub) >= rolling_window:
+                        c_mean = float(np.mean(sub[-rolling_window:]))
+                        c_spread = float(np.max(sub[-rolling_window:]) - np.min(sub[-rolling_window:]))
+                        if c_spread / max(abs(c_mean), 1e-12) < self.comp_tol:
+                            votes_stable += 1
+                if votes_stable >= vote_window:   # ALL sub-windows stable
+                    stable_count += 1
+                elif votes_stable >= max(1, vote_window - 1):  # allow 1 bad window
                     stable_count += 1
                 else:
-                    stable_count = 0
+                    stable_count = max(0, stable_count - 1)  # soft reset
             else:
                 stable_count = 0
 
