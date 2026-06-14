@@ -327,26 +327,9 @@ class MoriTanaka3DOptimizer:
 
         for it in range(n_iter):
             t0 = time.time()
-            # Gradual projection blend to avoid volume spike.
-            if self.member_projector is not None:
-                blend_start = max(8, int(0.10 * self.max_iterations))
-                blend_end = max(blend_start + 5, int(0.25 * self.max_iterations))
-                if it < blend_start:
-                    rho_phys = self._apply_density_filter(rho)
-                elif it < blend_end:
-                    alpha = float(it - blend_start) / float(max(blend_end - blend_start, 1))
-                    self.member_projector.set_beta(self._projection_beta(it))
-                    rho_filt = self._apply_density_filter(rho)
-                    rho_proj = self.member_projector.apply(rho, target_volume=self.volfrac_eff, rho_min=self.rho_min)
-                    rho_phys = (1.0 - alpha) * rho_filt + alpha * rho_proj
-                else:
-                    self.member_projector.set_beta(self._projection_beta(it))
-                    rho_phys = self.member_projector.apply(rho, target_volume=self.volfrac_eff, rho_min=self.rho_min)
-            else:
-                rho_phys = self._apply_density_filter(rho)
-            self._enforce_passive_solid(rho_phys)
-
-            e_eff_elem = self._effective_modulus_mori_tanaka(rho_phys)
+            # Direct evaluation on the current density field (which is already projected)
+            self._enforce_passive_solid(rho)
+            e_eff_elem = self._effective_modulus_mori_tanaka(rho)
             
             # Pass effective modulus scaling directly to FEA solver
             scale = e_eff_elem / float(max(self.material.E0, 1e-12))
@@ -359,14 +342,42 @@ class MoriTanaka3DOptimizer:
             compliance = float(self.fea.calculate_compliance_with_modulus(u, scale))
             compliance_history.append(compliance)
 
-            tensor = self._compute_homogenized_tensor(rho_phys)
-            dEdrho = self._effective_modulus_derivative(rho_phys)
-            dc, dv = self._compute_element_sensitivities(u, rho_phys, dEdrho)
-            dc = self._apply_sensitivity_filter(dc, rho_phys)
-            dv = self._apply_sensitivity_filter(dv, rho_phys)
+            tensor = self._compute_homogenized_tensor(rho)
+            dEdrho = self._effective_modulus_derivative(rho)
+            dc, dv = self._compute_element_sensitivities(u, rho, dEdrho)
+            dc = self._apply_sensitivity_filter(dc, rho)
+            dv = self._apply_sensitivity_filter(dv, rho)
 
+            # OC Update to get new design variable candidate
             rho_new = self._oc_update(rho, dc, dv, iteration=it)
+
+            # Apply projection heuristically to the updated design variable
+            if self.member_projector is not None:
+                blend_start = max(8, int(0.10 * self.max_iterations))
+                blend_end = max(blend_start + 5, int(0.25 * self.max_iterations))
+                if it < blend_start:
+                    rho_new = self._apply_density_filter(rho_new)
+                elif it < blend_end:
+                    alpha = float(it - blend_start) / float(max(blend_end - blend_start, 1))
+                    self.member_projector.set_beta(self._projection_beta(it))
+                    rho_filt = self._apply_density_filter(rho_new)
+                    rho_proj = self.member_projector.apply(rho_new, target_volume=self.volfrac_eff, rho_min=self.rho_min)
+                    rho_new = (1.0 - alpha) * rho_filt + alpha * rho_proj
+                else:
+                    self.member_projector.set_beta(self._projection_beta(it))
+                    rho_new = self.member_projector.apply(rho_new, target_volume=self.volfrac_eff, rho_min=self.rho_min)
+            else:
+                rho_new = self._apply_density_filter(rho_new)
+
             self._enforce_passive_solid(rho_new)
+
+            # Strict volume correction to prevent drift after projection
+            actual_vol = float(np.mean(rho_new))
+            if abs(actual_vol - self.volfrac_eff) > 0.005 and actual_vol > 1e-12:
+                rho_new *= self.volfrac_eff / actual_vol
+                rho_new = np.clip(rho_new, self.rho_min, 1.0)
+                self._enforce_passive_solid(rho_new)
+
             rho_change = float(np.max(np.abs(rho_new - rho)))
             comp_rel = abs(compliance - prev_comp) / max(abs(compliance), 1e-12) if prev_comp is not None else np.inf
             prev_comp = compliance
@@ -385,10 +396,10 @@ class MoriTanaka3DOptimizer:
             else:
                 stable_count = 0
 
-            vol = float(np.mean(rho_phys))
+            vol = float(np.mean(rho))
             if visualizer is not None:
                 try:
-                    rho_vis = np.where(rho_phys >= 0.5, 1.0, self.rho_min)
+                    rho_vis = np.where(rho >= 0.5, 1.0, self.rho_min)
                     self._enforce_passive_solid(rho_vis)
                     visualizer.update(it, rho_vis.copy(), compliance, vol)
                 except Exception as e:
