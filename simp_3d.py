@@ -298,12 +298,12 @@ class SIMP3DOptimizer:
                 alpha = float(iteration - blend_start) / float(max(blend_end - blend_start, 1))
                 self.member_projector.set_beta(self._projection_beta(iteration))
                 rho_filt = self.filter.apply_density(rho_new)
-                rho_proj = self.member_projector.apply(rho_new, target_volume=volume_constraint, rho_min=self.rho_min)
+                rho_proj = self.member_projector.apply(rho_new, target_volume=volume_constraint, rho_min=self.rho_min, passive_solid=self.passive_solid)
                 rho_new = (1.0 - alpha) * rho_filt + alpha * rho_proj
             else:
                 # Full projection
                 self.member_projector.set_beta(self._projection_beta(iteration))
-                rho_new = self.member_projector.apply(rho_new, target_volume=volume_constraint, rho_min=self.rho_min)
+                rho_new = self.member_projector.apply(rho_new, target_volume=volume_constraint, rho_min=self.rho_min, passive_solid=self.passive_solid)
         else:
             rho_new = self.filter.apply_density(rho_new)
 
@@ -430,11 +430,11 @@ class SIMP3DOptimizer:
                 alpha = float(iteration - blend_start) / float(max(blend_end - blend_start, 1))
                 self.member_projector.set_beta(self._projection_beta(iteration))
                 rho_filt = self.filter.apply_density(rho_new)
-                rho_proj = self.member_projector.apply(rho_new, target_volume=volume_constraint, rho_min=self.rho_min)
+                rho_proj = self.member_projector.apply(rho_new, target_volume=volume_constraint, rho_min=self.rho_min, passive_solid=self.passive_solid)
                 rho_new = (1.0 - alpha) * rho_filt + alpha * rho_proj
             else:
                 self.member_projector.set_beta(self._projection_beta(iteration))
-                rho_new = self.member_projector.apply(rho_new, target_volume=volume_constraint, rho_min=self.rho_min)
+                rho_new = self.member_projector.apply(rho_new, target_volume=volume_constraint, rho_min=self.rho_min, passive_solid=self.passive_solid)
         else:
             rho_new = self.filter.apply_density(rho_new)
 

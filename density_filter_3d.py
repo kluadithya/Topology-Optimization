@@ -137,7 +137,7 @@ class MinimumMemberSizeProjection3D:
     def set_beta(self, beta):
         self.beta = float(max(beta, 1.0))
 
-    def apply(self, rho, target_volume=None, rho_min=1e-6):
+    def apply(self, rho, target_volume=None, rho_min=1e-6, passive_solid=None):
         r = np.asarray(rho, dtype=np.float64)
         rmin = float(np.clip(rho_min, 0.0, 0.2))
 
@@ -152,11 +152,19 @@ class MinimumMemberSizeProjection3D:
             for _ in range(60):
                 eta_mid = 0.5 * (lo + hi)
                 proj_mid = 1.0 / (1.0 + np.exp(-self.beta * (x_bar - eta_mid)))
-                if float(np.mean(proj_mid)) > tv:
+                
+                if passive_solid is not None:
+                    proj_mid[passive_solid] = 1.0
+                    
+                phys = rmin + (1.0 - rmin) * proj_mid
+                if float(np.mean(phys)) > tv:
                     lo = eta_mid
                 else:
                     hi = eta_mid
             eta = 0.5 * (lo + hi)
 
         proj = 1.0 / (1.0 + np.exp(-self.beta * (x_bar - eta)))
+        if passive_solid is not None:
+            proj[passive_solid] = 1.0
+            
         return rmin + (1.0 - rmin) * proj

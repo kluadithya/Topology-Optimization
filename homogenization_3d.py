@@ -361,11 +361,11 @@ class MoriTanaka3DOptimizer:
                     alpha = float(it - blend_start) / float(max(blend_end - blend_start, 1))
                     self.member_projector.set_beta(self._projection_beta(it))
                     rho_filt = self._apply_density_filter(rho_new)
-                    rho_proj = self.member_projector.apply(rho_new, target_volume=self.volfrac_eff, rho_min=self.rho_min)
+                    rho_proj = self.member_projector.apply(rho_new, target_volume=self.volfrac_eff, rho_min=self.rho_min, passive_solid=self.passive_solid)
                     rho_new = (1.0 - alpha) * rho_filt + alpha * rho_proj
                 else:
                     self.member_projector.set_beta(self._projection_beta(it))
-                    rho_new = self.member_projector.apply(rho_new, target_volume=self.volfrac_eff, rho_min=self.rho_min)
+                    rho_new = self.member_projector.apply(rho_new, target_volume=self.volfrac_eff, rho_min=self.rho_min, passive_solid=self.passive_solid)
             else:
                 rho_new = self._apply_density_filter(rho_new)
 
