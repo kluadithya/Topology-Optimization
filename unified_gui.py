@@ -2061,42 +2061,7 @@ class UnifiedWorkflowGUI:
                     if hit:
                         mask[i] = True
 
-                try:
-                    edge_ref = None
-                    if tri_pts.shape[0] > 0:
-                        e01 = np.linalg.norm(tri_pts[:, 1, :] - tri_pts[:, 0, :], axis=1)
-                        e12 = np.linalg.norm(tri_pts[:, 2, :] - tri_pts[:, 1, :], axis=1)
-                        e20 = np.linalg.norm(tri_pts[:, 0, :] - tri_pts[:, 2, :], axis=1)
-                        edge_ref = float(np.median(np.hstack([e01, e12, e20])))
-                    if edge_ref is not None and edge_ref > 1e-12:
-                        layers = int(np.ceil(effective_distance / edge_ref))
-                        n_nodes_total = int(nodes.shape[0])
-                        node_to_elems = [[] for _ in range(n_nodes_total)]
-                        for eidx in range(n_elem):
-                            for nid in elems[eidx]:
-                                ni = int(nid)
-                                if 0 <= ni < n_nodes_total:
-                                    node_to_elems[ni].append(eidx)
-                        seed_elems = set()
-                        seed_nodes = set(int(n) for n in selected_tris.reshape(-1).tolist())
-                        for nid in seed_nodes:
-                            if 0 <= nid < n_nodes_total:
-                                seed_elems.update(node_to_elems[nid])
-                        expanded = set(seed_elems)
-                        frontier = set(seed_elems)
-                        for _ in range(layers):
-                            next_frontier = set()
-                            for eidx in frontier:
-                                for nid in elems[int(eidx)]:
-                                    for j in node_to_elems[int(nid)]:
-                                        if j not in expanded:
-                                            next_frontier.add(j)
-                            expanded.update(next_frontier)
-                            frontier = next_frontier
-                        if expanded:
-                            mask[np.fromiter(expanded, dtype=np.int64)] = True
-                except Exception:
-                    pass
+
 
                 mask |= touch_mask
                 return mask
